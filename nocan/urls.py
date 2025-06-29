@@ -8,6 +8,10 @@ urlpatterns = [
     path('api/', views.api),
     path('api/docs/', views.apiDocumentation, name='apiDocumentation'),
     
+    # Test endpoints for debugging
+    path('test/', views.test_view, name='test'),
+    path('health/', views.health_check, name='health_check'),
+    
     # Supabase API endpoints
     path('api/supabase/test-connection/', apiViews.testConnection, name='testConnection'),
     path('api/supabase/get-data/', apiViews.getData, name='getData'),

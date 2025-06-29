@@ -169,6 +169,12 @@ else:  # development
     DEBUG = True
     ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0']
 
+# Override DEBUG for PythonAnywhere to help with debugging
+DEBUG = True  # Set to True temporarily to see error details
+
+# Ensure ALLOWED_HOSTS includes the PythonAnywhere domain
+ALLOWED_HOSTS = ['taratechid.pythonanywhere.com', 'www.taratechid.pythonanywhere.com', 'localhost', '127.0.0.1']
+
 # Logging configuration
 LOGGING = {
     'version': 1,
