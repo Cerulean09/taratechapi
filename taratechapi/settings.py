@@ -25,7 +25,7 @@ SECRET_KEY = 'django-insecure-f-x#=1o_t6w)rvbvcm01(3g%dwojnfoo3(@*u_+az5-7l&t3*9
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['taratechid.pythonanywhere.com']
 
 
 # Application definition
@@ -126,6 +126,48 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # These can be overridden by environment variables
 SUPABASE_URL = 'https://your-project.supabase.co'
 SUPABASE_ANON_KEY = 'your-anon-key-here'
+
+# URL Configuration
+# Centralized URL settings - update these for different environments
+BASE_URL = 'https://taratechid.pythonanywhere.com'  # PythonAnywhere Production
+# BASE_URL = 'http://localhost:8000'  # Development
+# BASE_URL = 'https://staging.your-domain.com'  # Staging
+
+# API URL Configuration
+API_BASE_URL = f'{BASE_URL}/api'
+PAYMENT_API_BASE_URL = f'{API_BASE_URL}/payment'
+
+# Specific API endpoints (these will be automatically generated from BASE_URL)
+API_ENDPOINTS = {
+    'test_connection': f'{API_BASE_URL}/supabase/test-connection/',
+    'get_data': f'{API_BASE_URL}/supabase/get-data/',
+    'insert_data': f'{API_BASE_URL}/supabase/insert-data/',
+    'update_data': f'{API_BASE_URL}/supabase/update-data/',
+    'delete_data': f'{API_BASE_URL}/supabase/delete-data/',
+    'execute_query': f'{API_BASE_URL}/supabase/execute-query/',
+    'table_info': f'{API_BASE_URL}/supabase/table-info/',
+    'auth_login': f'{API_BASE_URL}/supabase/auth/login/',
+    'auth_register': f'{API_BASE_URL}/supabase/auth/register/',
+    'payment_create': f'{PAYMENT_API_BASE_URL}/create/',
+    'payment_status': f'{PAYMENT_API_BASE_URL}/{{payment_id}}/status/',
+    'payment_simulate': f'{PAYMENT_API_BASE_URL}/{{payment_id}}/simulate/',
+}
+
+# Environment-specific settings
+ENVIRONMENT = 'production'  # 'development', 'staging', 'production'
+
+# Environment-specific configurations
+if ENVIRONMENT == 'production':
+    DEBUG = False
+    ALLOWED_HOSTS = ['taratechid.pythonanywhere.com', 'www.taratechid.pythonanywhere.com']
+    # Add production-specific settings here
+elif ENVIRONMENT == 'staging':
+    DEBUG = True
+    ALLOWED_HOSTS = ['staging.your-domain.com']
+    # Add staging-specific settings here
+else:  # development
+    DEBUG = True
+    ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0']
 
 # Logging configuration
 LOGGING = {

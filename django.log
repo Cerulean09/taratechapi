@@ -12,3 +12,4 @@ ERROR 2025-06-26 20:44:09,274 apiViews 576 50688 Insert data error: [Errno 11001
 ERROR 2025-06-26 20:44:11,370 apiViews 576 52852 Update data error: [Errno 11001] getaddrinfo failed
 ERROR 2025-06-26 20:44:13,408 apiViews 576 54184 Delete data error: [Errno 11001] getaddrinfo failed
 ERROR 2025-06-26 20:44:15,431 apiViews 576 51612 Authentication error: [Errno 11001] getaddrinfo failed
+INFO 2025-06-27 12:19:00,581 supabaseClient 55408 48740 Supabase client initialized successfully

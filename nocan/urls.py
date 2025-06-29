@@ -1,6 +1,7 @@
 from django.urls import path
 from . import views
 from . import apiViews
+from . import paymentApiViews
 
 urlpatterns = [
     path('', views.myapp),
@@ -17,4 +18,9 @@ urlpatterns = [
     path('api/supabase/table-info/', apiViews.getTableInfo, name='getTableInfo'),
     path('api/supabase/auth/login/', apiViews.authenticateUser, name='authenticateUser'),
     path('api/supabase/auth/register/', apiViews.registerUser, name='registerUser'),
+    
+    # Payment API endpoints
+    path('api/payment/create/', paymentApiViews.createPayment, name='createPayment'),
+    path('api/payment/<str:paymentId>/status/', paymentApiViews.getPaymentStatus, name='getPaymentStatus'),
+    path('api/payment/<str:paymentId>/simulate/', paymentApiViews.simulatePayment, name='simulatePayment'),
 ]
