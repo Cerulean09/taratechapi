@@ -11,8 +11,11 @@ import os
 
 from django.core.wsgi import get_wsgi_application
 
-os.environ['NOCAN_ PAYMENT_API_KEY'] = 'YOUR_PAYMENT_API_KEY'
-os.environ['NOCAN_PAYMENT_API_SECRET'] = 'YOUR_PAYMENT_API_SECRET'
+os.environ['NOCAN_CREATE_PAYMENT_URL'] = 'https://api.harsya.com/v2/payments'
+os.environ['NOCAN_CONFIRM_PAYMENT_URL'] = 'https://api.harsya.com/v2/payments/{paymentId}/confirm'
+os.environ['NOCAN_ACCESS_TOKEN_URL'] = 'https://api.harsya.com/v1/access-token'
+os.environ['NOCAN_ PAYMENT_API_KEY'] = 'f723686f-c957-46f6-b530-970222479378'
+os.environ['NOCAN_PAYMENT_API_SECRET'] = 'aQtTUNC8R5ZNyZidtURDLL39K0LaMXqgRLjuszm3'
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'taratechapi.settings')
 
 application = get_wsgi_application()
