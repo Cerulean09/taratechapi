@@ -1,5 +1,5 @@
 from django.urls import path, include
-from .views import CreatePaymentView
+from .views import CreatePaymentView, ConfirmPaymentView
 
 urlpatterns = [
     path('create-payment/', CreatePaymentView.as_view(), name='create-payment'),
