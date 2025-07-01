@@ -82,10 +82,11 @@ class CreatePaymentView(APIView):
             # prepare request to your payment gateway
             gateway_payload = {
                 'clientReferenceId': request.data.get('clientReferenceId'),
-                'amount': {"value": request.data.get('amount'), "currency": "IDR"},
+                'amount': request.data.get('amount'),
                 'paymentMethod': request.data.get('paymentMethod'),
                 'paymentMethodOptions': request.data.get('paymentMethodOptions'),
-                'metadata': request.data.get('mode'),
+                'metadata': request.data.get('metadata'),
+                'mode': request.data.get('mode'),
                 'redirectUrl': request.data.get('redirectUrl'),
                 "autoConfirm": request.data.get('autoConfirm'),
                 "statementDescriptor": request.data.get('statementDescriptor'),
