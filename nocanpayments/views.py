@@ -106,14 +106,14 @@ class CreatePaymentView(APIView):
                 return Response(payment_data, status=status.HTTP_200_OK)
             except requests.exceptions.RequestException as e:
                 return Response({
-                    'error': str(e),
+                    'error': str(e+'\n create payment error'),
                 }, status=status.HTTP_400_BAD_REQUEST)
             
 
             
         except requests.exceptions.RequestException as e:
             return Response({
-                'error': str(e),
+                'error': str(e+'\n token error'),
             }, status=status.HTTP_400_BAD_REQUEST)
             
 
