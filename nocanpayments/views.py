@@ -59,7 +59,7 @@ class ConfirmPaymentView(APIView):
 class CheckPaymentView(APIView):
     def get(self, request):
         
-        payment_id = request.headers.get('paymentID')
+        payment_id = request.query_params.get('paymentID')
         if not payment_id:
             return Response({
                 "error": "Missing 'paymentID' header."
