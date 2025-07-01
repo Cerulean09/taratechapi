@@ -102,21 +102,33 @@ class CreatePaymentView(APIView):
 
             try:
                 response = requests.post(create_payment_url, json=request.data, headers=headers)
-                response.raise_for_status()
-                payment_data = response.json()
+                response.raise_for_status()  # will raise if 4xx/5xx
 
-                return Response(payment_data, status=status.HTTP_200_OK)
+                # Check content type before assuming JSON
+                content_type = response.headers.get('Content-Type', '')
+                if 'application/json' in content_type:
+                    payment_data = response.json()
+                else:
+                    payment_data = {'raw_html': response.text}
+
+                return Response(payment_data, status=response.status_code)
             except requests.exceptions.RequestException as e:
+                print("Payload sent to gateway:", request.data)
+                print("Response status:", response.status_code)
+                print("Response body:", response.text)
                 return Response({
-                    'error': str(e+'\n create payment error'),
+                    'error': str(e),
                 }, status=status.HTTP_400_BAD_REQUEST)
-            
 
-            
         except requests.exceptions.RequestException as e:
+            print("Payload sent to gateway:", request.data)
+            print("Response status:", response.status_code)
+            print("Response body:", response.text)
             return Response({
-                'error': str(e+'\n token error'),
+                'error': str(e) + '\n create payment error',
+                'status_code': getattr(e.response, 'status_code', None),
+                'text': getattr(e.response, 'text', 'No response text'),
             }, status=status.HTTP_400_BAD_REQUEST)
-            
+                    
 
         
