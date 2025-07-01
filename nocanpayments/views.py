@@ -79,28 +79,29 @@ class CreatePaymentView(APIView):
             access_token = response.json()['data']['accessToken']
 
 
-            # prepare request to your payment gateway
-            gateway_payload = {
-                'clientReferenceId': request.data.get('clientReferenceId'),
-                'amount': request.data.get('amount'),
-                'paymentMethod': request.data.get('paymentMethod'),
-                'paymentMethodOptions': request.data.get('paymentMethodOptions'),
-                'metadata': request.data.get('metadata'),
-                'mode': request.data.get('mode'),
-                'redirectUrl': request.data.get('redirectUrl'),
-                "autoConfirm": request.data.get('autoConfirm'),
-                "statementDescriptor": request.data.get('statementDescriptor'),
-                "expiryAt": request.data.get('expiryAt'),
-            }
+            # # prepare request to your payment gateway
+            # gateway_payload = {
+            #     'clientReferenceId': request.data.get('clientReferenceId'),
+            #     'amount': request.data.get('amount'),
+            #     'paymentMethod': request.data.get('paymentMethod'),
+            #     'paymentMethodOptions': request.data.get('paymentMethodOptions'),
+            #     'metadata': request.data.get('metadata'),
+            #     'mode': request.data.get('mode'),
+            #     'redirectUrl': request.data.get('redirectUrl'),
+            #     "autoConfirm": request.data.get('autoConfirm'),
+            #     "statementDescriptor": request.data.get('statementDescriptor'),
+            #     "expiryAt": request.data.get('expiryAt'),
+            # }
 
             headers = {
+                'Content-Type': 'application/json',
                 'Authorization': f'Bearer {access_token}',
                 'X-MERCHANT-ID': payment_api_key,
                 'X-MERCHANT-SECRET': payment_api_secret,
             }
 
             try:
-                response = requests.post(create_payment_url, json=gateway_payload, headers=headers)
+                response = requests.post(create_payment_url, json=request.data, headers=headers)
                 response.raise_for_status()
                 payment_data = response.json()
 
