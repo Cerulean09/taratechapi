@@ -57,7 +57,7 @@ class ConfirmPaymentView(APIView):
             }, status=status.HTTP_400_BAD_REQUEST)
             
 class CheckPaymentView(APIView):
-    def post(self, request):
+    def get(self, request):
         check_payment_url = os.getenv('NOCAN_CHECK_PAYMENT_URL').format(paymentId=request.headers.get('paymentID'))
         access_token_url = os.getenv('NOCAN_ACCESS_TOKEN_URL')
         payment_api_key = os.getenv('NOCAN_PAYMENT_API_KEY')
