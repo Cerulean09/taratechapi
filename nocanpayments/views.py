@@ -58,10 +58,30 @@ class ConfirmPaymentView(APIView):
             
 class CheckPaymentView(APIView):
     def get(self, request):
-        check_payment_url = os.getenv('NOCAN_CHECK_PAYMENT_URL').format(paymentId=request.headers.get('paymentID'))
+        
+        payment_id = request.headers.get('paymentID')
+        if not payment_id:
+            return Response({
+                "error": "Missing 'paymentID' header."
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        check_payment_url_template = os.getenv('NOCAN_CHECK_PAYMENT_URL')
         access_token_url = os.getenv('NOCAN_ACCESS_TOKEN_URL')
         payment_api_key = os.getenv('NOCAN_PAYMENT_API_KEY')
         payment_api_secret = os.getenv('NOCAN_PAYMENT_API_SECRET')
+
+        if not all([check_payment_url_template, access_token_url, payment_api_key, payment_api_secret]):
+            return Response({
+                "error": "Missing one or more required environment variables."
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        try:
+            check_payment_url = check_payment_url_template.format(paymentId=payment_id)
+        except Exception as e:
+            return Response({
+                "error": f"Failed to format payment URL with ID: {payment_id}",
+                "details": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # Step 1: Get access token
         token_headers = {
@@ -92,7 +112,15 @@ class CheckPaymentView(APIView):
         }
 
         gateway_response = requests.get(check_payment_url, headers=forward_headers)
-        return Response(gateway_response.json(), status=gateway_response.status_code)
+       
+        try:
+            return Response(gateway_response.json(), status=gateway_response.status_code)
+        except Exception as e:
+            return Response({
+                "error": "Gateway did not return JSON",
+                "status_code": gateway_response.status_code,
+                "raw": gateway_response.text,
+            }, status=status.HTTP_400_BAD_REQUEST)
 
 
         
