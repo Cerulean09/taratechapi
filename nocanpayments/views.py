@@ -56,6 +56,44 @@ class ConfirmPaymentView(APIView):
                 'error': str(e),
             }, status=status.HTTP_400_BAD_REQUEST)
             
+class CheckPaymentView(APIView):
+    def post(self, request):
+        check_payment_url = os.getenv('NOCAN_CHECK_PAYMENT_URL').format(paymentId=request.headers.get('paymentID'))
+        access_token_url = os.getenv('NOCAN_ACCESS_TOKEN_URL')
+        payment_api_key = os.getenv('NOCAN_PAYMENT_API_KEY')
+        payment_api_secret = os.getenv('NOCAN_PAYMENT_API_SECRET')
+
+        # Step 1: Get access token
+        token_headers = {
+            'X-MERCHANT-ID': payment_api_key,
+            'X-MERCHANT-SECRET': payment_api_secret,
+            'Content-Type': 'application/json',
+        }
+
+        token_response = requests.post(access_token_url, headers=token_headers, json={
+            "grantType": "client_credentials"
+        })
+
+        try:
+            access_token = token_response.json()['data']['accessToken']
+        except Exception as e:
+            return Response({
+                "error": "Failed to parse token response",
+                "response_text": token_response.text,
+                "status_code": token_response.status_code
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Step 2: Forward the Flutter payload
+        forward_headers = {
+            'Authorization': f'Bearer {access_token}',
+            'X-MERCHANT-ID': payment_api_key,
+            'X-MERCHANT-SECRET': payment_api_secret,
+            'Content-Type': 'application/json',
+        }
+
+        gateway_response = requests.get(check_payment_url, headers=forward_headers)
+        return Response(gateway_response.json(), status=gateway_response.status_code)
+
 
         
 class CreatePaymentView(APIView):
