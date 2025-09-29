@@ -12,19 +12,30 @@ def send_facebook_event(event_name, email=None):
     user_data = {}
     if email:
         user_data["em"] = [hashlib.sha256(email.strip().lower().encode()).hexdigest()]
-    # if phone:
-    #     user_data["ph"] = [hashlib.sha256(phone.strip().encode()).hexdigest()]
 
-    payload = {
-        "data": [{
-            "event_name": event_name,
-            "event_time": int(time.time()),
-            "action_source": "website",
-            "user_data": user_data,
-        }]
+    event = {
+        "event_name": event_name,
+        "event_time": int(time.time()),
+        "action_source": "website",
+        "user_data": user_data,
     }
-    response = requests.post(url, params={"access_token": META_ACCESS_TOKEN}, json=payload)
-    return response.json()
+
+    # Add defaults if no user data
+    if not user_data:
+        event["custom_data"] = {
+            "content_ids": ["default"],
+            "content_type": "product",
+            "currency": "IDR",
+            "value": 0.0,
+        }
+
+    payload = {"data": [event]}
+    resp = requests.post(url, params={"access_token": META_ACCESS_TOKEN}, json=payload, timeout=10)
+    try:
+        return resp.json()
+    except Exception:
+        return {"status_code": resp.status_code, "text": resp.text}
+
 
 
 # === GOOGLE ANALYTICS 4 ===

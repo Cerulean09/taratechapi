@@ -15,5 +15,5 @@ def track_event(request):
         fb_resp = send_facebook_event(event_name, email=email)
         # ga_resp = send_google_event( event_name, {"source": "flutter_app"})
 
-        return JsonResponse({"facebook": fb_resp, "google": ga_resp})
+        return JsonResponse({"facebook": fb_resp})
     return JsonResponse({"error": "Only POST allowed"}, status=405)
