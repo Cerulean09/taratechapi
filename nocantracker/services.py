@@ -31,7 +31,7 @@ def send_facebook_event(event_name, email=None):
 
     if not email:
         return {"status_code": 400,
-            "error": "Email is required for this event"}
+            "error": "Email is required for this event, current user data: " + str(user_data)}
 
 
     payload = {"data": [event]}
