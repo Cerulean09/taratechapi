@@ -28,9 +28,10 @@ def send_facebook_event(event_name, email=None):
             "currency": "IDR",
             "value": 0.0,
         }
-        
+
     if not email:
-        return JsonResponse({"error": "Email is required for this event"}, status=400)
+        return {"status_code": 400,
+            "error": "Email is required for this event"}
 
 
     payload = {"data": [event]}
