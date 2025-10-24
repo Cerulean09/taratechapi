@@ -20,9 +20,6 @@ def send_login_notification(request):
     user_email = data.get("email")
     username = data.get("username")
     login_time = data.get("login_time") or datetime.utcnow().isoformat()
-    ip = data.get("ip", "N/A")
-    device = data.get("device", "N/A")
-    platform = data.get("platform", "N/A")
 
     if not user_email or not username:
         return JsonResponse({"error": "Missing required fields"}, status=400)
@@ -33,9 +30,6 @@ def send_login_notification(request):
         <p>You have successfully logged in.</p>
         <ul>
             <li><strong>Time:</strong> {login_time}</li>
-            <li><strong>IP:</strong> {ip}</li>
-            <li><strong>Device:</strong> {device}</li>
-            <li><strong>Platform:</strong> {platform}</li>
         </ul>
         <p>If this wasn’t you, please change your password immediately.</p>
     """
