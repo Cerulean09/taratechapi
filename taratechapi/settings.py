@@ -29,6 +29,7 @@ DEBUG = True
 
 ALLOWED_HOSTS = [
     'taratechid.pythonanywhere.com',
+
 ]
 
 
