@@ -19,5 +19,12 @@ os.environ['NOCAN_ACCESS_TOKEN_URL'] = 'https://api.harsya.com/v1/access-token'
 os.environ['NOCAN_PAYMENT_API_KEY'] = 'f723686f-c957-46f6-b530-970222479378'
 os.environ['NOCAN_PAYMENT_API_SECRET'] = 'aQtTUNC8R5ZNyZidtURDLL39K0LaMXqgRLjuszm3'
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'taratechapi.settings')
+os.environ['ZOHO_EMAIL_USER']='hello@taratech.id'
+os.environ['ZOHO_EMAIL_PASS']='ClearDay9'
+os.environ['EMAIL_HOST']='smtp.zoho.com'
+os.environ['EMAIL_PORT']=465
+os.environ['EMAIL_USE_SSL']=1
+os.environ['EMAIL_USE_TLS']=0
+os.environ['DEFAULT_FROM_EMAIL']='hello@taratech.id'
 
 application = get_wsgi_application()
