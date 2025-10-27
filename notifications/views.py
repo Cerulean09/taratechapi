@@ -29,7 +29,7 @@ def send_login_notification(request):
         <p>Hello <strong>{username}</strong>,</p>
         <p>You have successfully logged in.</p>
         <ul>
-            <li><strong>Time:</strong> {login_time.strftime("%d-$m-%Y %H:%M:%S")}</li>
+            <li><strong>Time:</strong> {login_time.replace('T',' ').replace('Z','')}</li>
         </ul>
         <p>If this wasn’t you, please change your password immediately.</p>
     """
@@ -70,7 +70,7 @@ def send_signup_notification(request):
         <p>Hello <strong>{username}</strong>,</p>
         <p>You have successfully signed up. Welcome to Tara Tech!</p>
         <ul>
-            <li><strong>Time:</strong> {signup_time.strftime("%d-$m-%Y %H:%M:%S")}</li>
+            <li><strong>Time:</strong> {signup_time.replace('T',' ').replace('Z','')}</li>
         </ul>
         <p>Thank you for signing up with Tara Tech!</p>
     """
@@ -113,7 +113,7 @@ def send_reservation_request_notification(request):
         <p>Hello <strong>{username}</strong>,</p>
         <p>You have successfully requested a reservation. Please wait for confirmation!</p>
         <ul>
-            <li><strong>Date and Time:</strong> {reservation_request_time.strftime("%d-$m-%Y %H:%M:%S")}</li>
+            <li><strong>Date and Time:</strong> {reservation_request_time.replace('T',' ').replace('Z','')}</li>
             <li><strong>Outlet Name:</strong> {outlet_name}</li>
             <li><strong>Number of Guests:</strong> {number_of_guests}</li>
             <li><strong>Special Request:</strong> {special_request}</li>
@@ -159,7 +159,7 @@ def send_reservation_confirmation_notification(request):
         <p>Hello <strong>{username}</strong>,</p>
         <p>Your reservation has been confirmed. See you there!</p>
         <ul>
-            <li><strong>Date and Time:</strong> {reservation_confirmation_time.strftime("%d-$m-%Y %H:%M:%S")}</li>
+            <li><strong>Date and Time:</strong> {reservation_confirmation_time.replace('T',' ').replace('Z','')}</li>
             <li><strong>Outlet Name:</strong> {outlet_name}</li>
             <li><strong>Number of Guests:</strong> {number_of_guests}</li>
             <li><strong>Special Request:</strong> {special_request}</li>
@@ -205,7 +205,7 @@ def send_reservation_cancellation_notification(request):
         <p>Hello <strong>{username}</strong>,</p>
         <p>Your reservation has been cancelled. Reservation Details:</p>
         <ul>
-            <li><strong>Time:</strong> {reservation_cancellation_time.strftime("%d-$m-%Y %H:%M:%S")}</li>
+            <li><strong>Time:</strong> {reservation_cancellation_time.replace('T',' ').replace('Z','')}</li>
             <li><strong>Outlet Name:</strong> {outlet_name}</li>
             <li><strong>Special Request:</strong> {special_request}</li>
         </ul>
