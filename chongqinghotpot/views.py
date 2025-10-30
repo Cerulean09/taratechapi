@@ -1,54 +1,50 @@
-from django.shortcuts import render
-
-from django.core.mail import EmailMultiAlternatives
-from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
-from django.utils.html import strip_tags
-import json
-from datetime import datetime
-import requests
-import os
-
-from django.conf import settings
-import hmac
-import hashlib
-import base64
-import requests
+import os, hmac, hashlib, base64, requests
 from datetime import datetime, timezone
 
 def generate_headers(method: str, path: str):
     dt = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-    request_line = "%s %s HTTP/1.1" % (method.upper(), path)
-    signing_string = "date: %s\n%s" % (dt, request_line)
+    request_line = f"{method.upper()} {path} HTTP/1.1"
+    signing_string = f"date: {dt}\n{request_line}"
+
+    client_secret = os.getenv("CQ_HOTPOT_QONTAK_CLIENT_SECRET")
+    client_id = os.getenv("CQ_HOTPOT_QONTAK_CLIENT_ID")
+
+    if not client_secret or not client_id:
+        return {"error": "Missing Mekari credentials"}
 
     signature = base64.b64encode(
-        hmac.new(
-            os.getenv('CQ_HOTPOT_QONTAK_CLIENT_SECRET').encode(),
-            signing_string.encode(),
-            hashlib.sha256
-        ).digest()
+        hmac.new(client_secret.encode(), signing_string.encode(), hashlib.sha256).digest()
     ).decode()
 
     auth_header = (
-        'hmac username="%s", algorithm="hmac-sha256", headers="date request-line", signature="%s"' % (os.getenv('CQ_HOTPOT_QONTAK_CLIENT_ID'), signature)
+        f'hmac username="{client_id}", '
+        f'algorithm="hmac-sha256", headers="date request-line", signature="{signature}"'
     )
 
     return {
         "Authorization": auth_header,
         "Date": dt,
         "Accept": "application/json",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
 
 
 def send_mekari_request(method: str, path: str, payload=None):
     headers = generate_headers(method, path)
-    url = "https://%s%s" % (os.getenv('MEKARI_URL'), path)
-    resp = requests.request(method.upper(), url, headers=headers, json=payload)
+    if "error" in headers:
+        return {"http_code": 500, "body": headers}
+
+    base_url = os.getenv("MEKARI_URL", "api.mekari.com")
+    url = f"https://{base_url}{path}"
+
     try:
-        return {"http_code": resp.status_code, "body": resp.json()}
-    except Exception:
-        return {"http_code": resp.status_code, "body": resp.text}
+        resp = requests.request(method.upper(), url, headers=headers, json=payload)
+        data = resp.json() if resp.content else {}
+        return {"http_code": resp.status_code, "body": data}
+    except Exception as e:
+        return {"http_code": 500, "body": {"error": str(e)}}
+
 
 def get_all_contacts(request):
     """
@@ -59,8 +55,10 @@ def get_all_contacts(request):
 
     if result["http_code"] != 200:
         print("Failed to fetch contacts:", result)
-        return []
+        return JsonResponse(result, status=result["http_code"], safe=False)
 
     data = result["body"].get("data", [])
-    print("Retrieved %s contacts" % len(data))
-    return data
+    print(f"Retrieved {len(data)} contacts")
+
+    # ✅ Always return an HTTP response
+    return JsonResponse({"contacts": data}, safe=False)
