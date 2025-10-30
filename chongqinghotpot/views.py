@@ -1,64 +1,74 @@
-from django.http import JsonResponse
-import os, hmac, hashlib, base64, requests
+import os
+import hmac
+import hashlib
+import base64
 from datetime import datetime, timezone
 
-def generate_headers(method: str, path: str):
-    dt = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-    request_line = f"{method.upper()} {path} HTTP/1.1"
-    signing_string = f"date: {dt}\n{request_line}"
+import requests
+from django.http import JsonResponse
 
-    client_secret = os.getenv("CQ_HOTPOT_QONTAK_CLIENT_SECRET")
+def generate_hmac_headers(method: str, path: str, query_string: str = ""):
+    """
+    Generates HMAC headers for Mekari (Qontak) API authentication.
+    Equivalent to the Postman Pre-Request Script using CryptoJS.
+
+    Args:
+        method (str): HTTP method (GET, POST, etc.)
+        path (str): The request path (e.g. "/qontak/chat/v1/contacts/...")
+        query_string (str, optional): URL query string (e.g. "page=2&limit=100")
+
+    Returns:
+        dict: Headers including Authorization, Date, and Content-Type
+    """
+
+    # ✅ Load credentials from environment (set in PythonAnywhere web settings)
     client_id = os.getenv("CQ_HOTPOT_QONTAK_CLIENT_ID")
+    client_secret = os.getenv("CQ_HOTPOT_QONTAK_CLIENT_SECRET")
+    # sso_id = os.getenv("CQ_HOTPOT_QONTAK_SSO_ID")  # optional, required for user-specific requests
 
-    if not client_secret or not client_id:
-        return {"error": "Missing Mekari credentials"}
+    if not client_id or not client_secret:
+        raise ValueError("Missing Mekari CLIENT_ID or CLIENT_SECRET environment variables")
 
-    signature = base64.b64encode(
-        hmac.new(client_secret.encode(), signing_string.encode(), hashlib.sha256).digest()
-    ).decode()
+    # ✅ Format date like Postman’s "new Date().toUTCString()"
+    datetime_str = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
 
-    auth_header = (
-        f'hmac username="{client_id}", '
-        f'algorithm="hmac-sha256", headers="date request-line", signature="{signature}"'
+    # ✅ Combine path and query (e.g., /endpoint?param=value)
+    full_path = path + ("?%s" % query_string if query_string else "")
+
+    # ✅ Build request line and signing payload
+    request_line = "%s %s HTTP/1.1" % (method.upper(), full_path)
+    payload = "date: %s\n%s" % (datetime_str, request_line)
+
+    # ✅ Generate HMAC-SHA256 signature (same as CryptoJS.HmacSHA256)
+    digest = hmac.new(client_secret.encode(), payload.encode(), hashlib.sha256).digest()
+    signature = base64.b64encode(digest).decode()
+
+    # ✅ Format the Authorization header exactly as Mekari expects
+    authorization_header = (
+        'hmac username="%s", algorithm="hmac-sha256", headers="date request-line", signature="%s"' % (client_id, signature)
     )
 
-    return {
-        "Authorization": auth_header,
-        "Date": dt,
-        "Accept": "application/json",
+    # ✅ Return all required headers
+    headers = {
         "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Date": datetime_str,
+        "Authorization": authorization_header,
     }
 
+    return headers
 
-def send_mekari_request(method: str, path: str, payload=None):
-    headers = generate_headers(method, path)
-    if "error" in headers:
-        return {"http_code": 500, "body": headers}
 
-    base_url = os.getenv("MEKARI_URL", "api.mekari.com")
-    url = f"https://{base_url}{path}"
-
-    try:
-        resp = requests.request(method.upper(), url, headers=headers, json=payload)
-        data = resp.json() if resp.content else {}
-        return {"http_code": resp.status_code, "body": data}
-    except Exception as e:
-        return {"http_code": 500, "body": {"error": str(e)}}
 
 
 def get_all_contacts(request):
-    """
-    Retrieve all contacts from a specific Qontak contact list.
-    """
-    path = "/qontak/crm/contacts/info"
-    result = send_mekari_request("GET", path)
+    path = "/qontak/crm/contacts"
 
-    if result["http_code"] != 200:
-        print("Failed to fetch contacts:", result)
-        return JsonResponse(result, status=result["http_code"], safe=False)
+    headers = generate_hmac_headers("GET", path)
+    url = "https://%s%s" % (os.getenv('MEKARI_URL'), path)
 
-    data = result["body"].get("data", [])
-    print(f"Retrieved {len(data)} contacts")
+    response = requests.get(url, headers=headers)
+    data = response.json() if response.content else {}
 
-    # ✅ Always return an HTTP response
-    return JsonResponse({"contacts": data}, safe=False)
+    return JsonResponse(data, safe=False)
+
