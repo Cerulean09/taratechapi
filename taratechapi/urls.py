@@ -22,4 +22,5 @@ urlpatterns = [
     path('api/', include('nocanpayments.urls')),
      path("api/tracker/", include("nocantracker.urls")),
      path('api/notifications/', include('notifications.urls')),
+     path('api/chongqinghotpot/', include('chongqinghotpot.urls')),
 ]
