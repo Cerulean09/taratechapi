@@ -34,10 +34,7 @@ def generate_headers(method: str, path: str):
     )
 
     return {
-        "Authorization": auth_header,
-        "Date": dt,
-        "Accept": "application/json",
-        "Content-Type": "application/json"
+        "Authorization": "Bearer %s" % os.getenv('CQ_HOTPOT_QONTAK_ACCESS_TOKEN'),
     }
 
 
@@ -54,7 +51,7 @@ def get_all_contacts(request):
     """
     Retrieve all contacts from a specific Qontak contact list.
     """
-    path = "/qontak/chat/v1/contacts/contact_lists/contacts"
+    path = "/api/open/v1/contacts/contact_lists"
     result = send_mekari_request("GET", path)
 
     if result["http_code"] != 200:
