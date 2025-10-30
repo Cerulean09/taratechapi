@@ -50,7 +50,7 @@ def get_all_contacts(request):
     """
     Retrieve all contacts from a specific Qontak contact list.
     """
-    path = "/qontak/chat/v1/contacts/contact_lists/contacts"
+    path = "/qontak/crm/contacts/info"
     result = send_mekari_request("GET", path)
 
     if result["http_code"] != 200:
