@@ -45,7 +45,8 @@ INSTALLED_APPS = [
     'rest_framework',
     'nocanpayments',
     'nocantracker',
-    'notifications'
+    'notifications',
+    'chongqinghotpot',
 ]
 
 MIDDLEWARE = [
