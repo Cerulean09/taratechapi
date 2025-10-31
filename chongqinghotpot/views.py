@@ -56,7 +56,7 @@ def get_all_contacts(request):
 
     if result["http_code"] != 200:
         print("Failed to fetch contacts:", result)
-        return []
+        return JsonResponse(result, status=result["http_code"], safe=False)
 
     # data = result["body"].get("data", [])
     # print("Retrieved %s contacts" % len(data))
