@@ -78,13 +78,21 @@ def send_mekari_request(method: str, path: str, payload=None):
 
 def get_all_contacts(request):
     """
-    Retrieve all contacts from Qontak (Mekari) API.
+    Retrieve all contacts from Qontak's Open API.
+    Uses simple Bearer token authentication (no HMAC needed).
     """
-    path = "/qontak/chat/v1/contacts"  # uses your current scope (qontak-chat:contacts:list)
-    result = send_mekari_request("GET", path)
+    base_url = "https://" + os.getenv("MEKARI_URL")
+    path = "/api/open/v1/contacts/contact_lists"
 
-    if result["http_code"] != 200:
-        print("Failed to fetch contacts:", result)
-        return JsonResponse(result, status=result["http_code"], safe=False)
+    headers = {
+        "Authorization": "Bearer %s" % os.getenv('CQ_HOTPOT_QONTAK_ACCESS_TOKEN'),
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
 
-    return JsonResponse(result["body"], safe=False)
+    try:
+        response = requests.get(f"{base_url}{path}", headers=headers)
+        data = response.json() if response.content else {}
+        return JsonResponse(data, status=response.status_code, safe=False)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500, safe=False)
