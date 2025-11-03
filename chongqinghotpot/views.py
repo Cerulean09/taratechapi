@@ -36,5 +36,6 @@ def generate_headers(method, path):
 
 def get_all_contacts(request):
     token = get_token()
-    print(token)
-    return JsonResponse(token, safe=False, status=200)
+    response = requests.get('https://app.qontak.com/api/v3.1/contacts', auth=token, headers={'Content-Type': 'application/json'})
+    print(response.json())
+    return JsonResponse(response.json(), safe=False, status=response.status_code)
