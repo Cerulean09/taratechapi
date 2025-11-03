@@ -1,7 +1,7 @@
 from django.urls import path
-from .views import get_crm_contacts
+from .views import get_all_contacts
 
 urlpatterns = [
-    path("get-crm-contacts/", get_crm_contacts, name="get_crm_contacts"),
+    path("get-all-contacts/", get_all_contacts, name="get_all_contacts"),
 
 ]
