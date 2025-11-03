@@ -6,57 +6,65 @@ import requests
 from datetime import datetime, timezone
 from django.http import JsonResponse
 
-# === CONFIG ===
-CLIENT_ID = os.getenv('MEKARI_CLIENT_ID')
-CLIENT_SECRET = os.getenv('MEKARI_CLIENT_SECRET')
+# ---- CONFIG ----
+MEKARI_CLIENT_ID = os.getenv('MEKARI_CLIENT_ID')
+MEKARI_CLIENT_SECRET = os.getenv('MEKARI_CLIENT_SECRET')
 BASE_URL = "https://api.mekari.com"
 
-
-def generate_hmac_headers(method, path):
+def generate_hmac_headers(method: str, path: str):
     """
-    Generate HMAC headers for Mekari CRM API.
+    Generate headers exactly matching Mekari's HMAC validator requirements.
     """
-    dt = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
+    # RFC7231 UTC datetime
+    date_str = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
 
-    # Mekari HMAC string
+    # Mekari signing string
     request_line = f"{method.upper()} {path} HTTP/1.1"
-    signing_string = f"date: {dt}\n{request_line}"
+    signing_string = f"date: {date_str}\n{request_line}"
 
+    # Generate HMAC-SHA256 signature
     signature = base64.b64encode(
         hmac.new(
-            CLIENT_SECRET.encode(),
+            MEKARI_CLIENT_SECRET.encode(),
             signing_string.encode(),
             hashlib.sha256
         ).digest()
     ).decode()
 
     authorization = (
-        f'hmac username="{CLIENT_ID}", '
-        f'algorithm="hmac-sha256", '
-        f'headers="date request-line", '
+        f'hmac username="{MEKARI_CLIENT_ID}", '
+        f'algorithm="hmac-sha256", headers="date request-line", '
         f'signature="{signature}"'
     )
 
     return {
         "Authorization": authorization,
-        "Date": dt,
-        "Content-Type": "application/json"
+        "Date": date_str,
+        "Accept": "application/json",
+        "Content-Type": "application/json",
     }
-
 
 def get_crm_contacts(request):
     """
-    Sync Qontak CRM contacts into your app.
+    Fetch contacts from Qontak CRM.
     """
     path = "/qontak/crm/contacts"
     url = f"{BASE_URL}{path}"
-
     headers = generate_hmac_headers("GET", path)
+
     response = requests.get(url, headers=headers)
 
-    try:
-        data = response.json()
-    except Exception:
-        data = {"error": response.text}
+    # Debug print (optional)
+    print("URL:", url)
+    print("Headers:", headers)
+    print("Response Code:", response.status_code)
+    print("Response Text:", response.text)
 
-    return JsonResponse(data, safe=False, status=response.status_code)
+    try:
+        return JsonResponse(response.json(), safe=False, status=response.status_code)
+    except Exception:
+        return JsonResponse(
+            {"error": "Invalid JSON response", "raw": response.text},
+            safe=False,
+            status=response.status_code,
+        )
