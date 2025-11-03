@@ -21,25 +21,39 @@ def get_token():
         "password": password
     }
 
-    response = requests.post(url, headers=headers, data=data)
+    try:
+        response = requests.post(url, headers=headers, data=data)
+        print("🟡 Token Response Code:", response.status_code)
+        print("🟡 Token Response Body:", response.text)
 
-    print("🟡 Token response code:", response.status_code)
-    print("🟡 Token response body:", response.text)
+        if response.status_code == 200:
+            token_data = response.json()
+            return token_data.get("access_token")
 
-    if response.status_code == 200:
-        token_data = response.json()
-        return token_data.get("access_token")
+        # Return full context for debugging
+        return {
+            "error": "Token request failed",
+            "status_code": response.status_code,
+            "body": response.text,
+        }
 
-    return None
+    except Exception as e:
+        print("❌ Exception in get_token:", str(e))
+        return {"error": str(e)}
 
 
 def get_all_contacts(request):
     """
     Retrieve all CRM contacts from Qontak using Bearer token authentication.
     """
-    token = get_token()
-    if not token:
-        return JsonResponse({"error": "Failed to retrieve access token"}, status=500)
+    token_info = get_token()
+    print("🟠 Token info:", token_info)
+
+    # If token_info is dict, it means token request failed
+    if isinstance(token_info, dict) and "error" in token_info:
+        return JsonResponse(token_info, status=500)
+
+    token = token_info
 
     url = "https://app.qontak.com/api/v3.1/contacts"
     headers = {
@@ -47,14 +61,18 @@ def get_all_contacts(request):
         "Content-Type": "application/json",
     }
 
-    response = requests.get(url, headers=headers)
-
-    print("🟢 Contacts response code:", response.status_code)
-    print("🟢 Contacts response body:", response.text)
-
     try:
-        data = response.json()
-    except Exception:
-        data = {"error": response.text}
+        response = requests.get(url, headers=headers)
+        print("🟢 Contacts Response Code:", response.status_code)
+        print("🟢 Contacts Response Body:", response.text)
 
-    return JsonResponse(data, safe=False, status=response.status_code)
+        try:
+            data = response.json()
+        except Exception:
+            data = {"raw_text": response.text}
+
+        return JsonResponse(data, safe=False, status=response.status_code)
+
+    except Exception as e:
+        print("❌ Exception in get_all_contacts:", str(e))
+        return JsonResponse({"error": str(e)}, status=500)
