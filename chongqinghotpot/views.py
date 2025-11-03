@@ -1,41 +1,63 @@
-import os, hmac, hashlib, base64, requests
-from datetime import datetime, timezone
-from django.http import JsonResponse
+import json
 import http.client
+import requests
+from django.http import JsonResponse
+
 
 def get_token():
-    appId = '7081ae8fd19319d15260732c931d8daeb9fdace21adb39186b6c0bfd548b0db7'
-    appSecret = '4b27495f82d98f203038fbd8093e38749e8ad4432b68489833b6e6ca9458d87a'
-    crmUsername = 'callcenter@chongqinghotpot.id'
+    """
+    Get Qontak OAuth access token using CRM username/password (no client_id needed).
+    """
+    crm_username = 'callcenter@chongqinghotpot.id'
     password = 'PassWord88@00'
+
     conn = http.client.HTTPSConnection("app.qontak.com")
-    payload = 'grant_type=password&Content-Type=application%2Fx-www-form-urlencoded&username={crmUsername}&password={password}'
-    headers = {}
+    payload = f'grant_type=password&username={crm_username}&password={password}'
+
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json',
+    }
+
     conn.request("POST", "/oauth/token", payload, headers)
     res = conn.getresponse()
-    data = res.read()
-    return data.decode("utf-8")
+    data = res.read().decode("utf-8")
 
-def generate_headers(method, path):
-    dt = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-    signing_string = f"date: {dt}\n{method.upper()} {path} HTTP/1.1"
-    signature = base64.b64encode(
-        hmac.new(
-            os.getenv('CQ_HOTPOT_QONTAK_CLIENT_SECRET').encode(),
-            signing_string.encode(),
-            hashlib.sha256
-        ).digest()
-    ).decode()
-    return {
-        "Authorization": f'hmac username="{os.getenv("CQ_HOTPOT_QONTAK_CLIENT_ID")}", '
-                         f'algorithm="hmac-sha256", headers="date request-line", '
-                         f'signature="{signature}"',
-        "Date": dt,
+    try:
+        token_data = json.loads(data)
+        return token_data.get("access_token")
+    except Exception as e:
+        print("Error parsing token response:", e)
+        print("Raw token response:", data)
+        return None
+
+
+def get_all_contacts(request):
+    """
+    Retrieve all CRM contacts from Qontak using Bearer token authentication.
+    """
+    token = get_token()
+    if not token:
+        return JsonResponse({"error": "Failed to retrieve access token"}, status=500)
+
+    url = "https://app.qontak.com/api/v3.1/contacts"
+    headers = {
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
 
-def get_all_contacts(request):
-    token = get_token()
-    response = requests.get('https://app.qontak.com/api/v3.1/contacts', auth=token, headers={'Content-Type': 'application/json'})
-    print(response.json())
-    return JsonResponse(response.json(), safe=False, status=response.status_code)
+    # You can include optional query parameters (example: ?page=1&per_page=25)
+    params = {
+        "page": 1,
+        "per_page": 25,
+    }
+
+    response = requests.get(url, headers=headers, params=params)
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {"error": response.text}
+
+    print("Response:", data)
+    return JsonResponse(data, safe=False, status=response.status_code)
