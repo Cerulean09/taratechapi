@@ -13,7 +13,7 @@ def get_token_from_refresh():
     client_id = "7081ae8fd19319d15260732c931d8daeb9fdace21adb39186b6c0bfd548b0db7"
     client_secret = "4b27495f82d98f203038fbd8093e38749e8ad4432b68489833b6e6ca9458d87a"
     refresh_token = "e06733bcdeb348709cbbee04594d548914178be17fe36388620bb84ce518fbe1"
-    redirect_uri = "https://taratechid.pythonanywhere.com/api/chongqinghotpot/get-all-contacts/"
+    redirect_uri = ""
 
     # Follow Qontak’s exact form-urlencoded string payload format
     payload = (
