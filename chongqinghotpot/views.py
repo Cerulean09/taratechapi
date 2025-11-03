@@ -1,6 +1,20 @@
 import os, hmac, hashlib, base64, requests
 from datetime import datetime, timezone
 from django.http import JsonResponse
+import http.client
+
+def get_token():
+    appId = '7081ae8fd19319d15260732c931d8daeb9fdace21adb39186b6c0bfd548b0db7'
+    appSecret = '4b27495f82d98f203038fbd8093e38749e8ad4432b68489833b6e6ca9458d87a'
+    crmUsername = 'callcenter@chongqinghotpot.id'
+    password = 'PassWord88@00'
+    conn = http.client.HTTPSConnection("app.qontak.com")
+    payload = 'grant_type=password&Content-Type=application%2Fx-www-form-urlencoded&username={crmUsername}&password={password}'
+    headers = {}
+    conn.request("POST", "/oauth/token", payload, headers)
+    res = conn.getresponse()
+    data = res.read()
+    return data.decode("utf-8")
 
 def generate_headers(method, path):
     dt = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
@@ -21,9 +35,6 @@ def generate_headers(method, path):
     }
 
 def get_all_contacts(request):
-    path = "/qontak/crm/contacts?created_after=15-07-2000"
-    headers = generate_headers("GET", path)
-    url = f"https://api.mekari.com{path}"
-
-    response = requests.get(url, headers=headers)
-    return JsonResponse(response.json(), safe=False, status=response.status_code)
+    token = get_token()
+    print(token)
+    return JsonResponse(token, safe=False, status=200)
