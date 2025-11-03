@@ -21,7 +21,7 @@ def generate_headers(method, path):
     }
 
 def get_all_contacts(request):
-    path = "/qontak/crm/contacts"
+    path = "/qontak/crm/contacts?created_after=15-07-2000"
     headers = generate_headers("GET", path)
     url = f"https://api.mekari.com{path}"
 
