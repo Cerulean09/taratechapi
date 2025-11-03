@@ -1,45 +1,39 @@
-import json
 import requests
 from django.http import JsonResponse
-
 
 def get_token():
     """
     Get Qontak OAuth access token using CRM username/password.
     """
-    crm_username = 'callcenter@chongqinghotpot.id'
-    password = 'PassWord88@00'
-
     url = "https://app.qontak.com/oauth/token"
-    headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json"
-    }
+
     data = {
         "grant_type": "password",
-        "username": crm_username,
-        "password": password
+        "client_id": "7081ae8fd19319d15260732c931d8daeb9fdace21adb39186b6c0bfd548b0db7",
+        "client_secret": "4b27495f82d98f203038fbd8093e38749e8ad4432b68489833b6e6ca9458d87a",
+        "username": "callcenter@chongqinghotpot.id",
+        "password": "PassWord88@00",
     }
 
-    try:
-        response = requests.post(url, headers=headers, data=data)
-        print("🟡 Token Response Code:", response.status_code)
-        print("🟡 Token Response Body:", response.text)
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+    }
 
-        if response.status_code == 200:
-            token_data = response.json()
-            return token_data.get("access_token")
+    response = requests.post(url, headers=headers, data=data)
 
-        # Return full context for debugging
-        return {
-            "error": "Token request failed",
-            "status_code": response.status_code,
-            "body": response.text,
-        }
+    print("🟡 Token Response Code:", response.status_code)
+    print("🟡 Token Response Body:", response.text)
 
-    except Exception as e:
-        print("❌ Exception in get_token:", str(e))
-        return {"error": str(e)}
+    if response.status_code == 200:
+        token_data = response.json()
+        return token_data.get("access_token")
+
+    return {
+        "error": "Token request failed",
+        "status_code": response.status_code,
+        "body": response.text,
+    }
 
 
 def get_all_contacts(request):
@@ -49,7 +43,6 @@ def get_all_contacts(request):
     token_info = get_token()
     print("🟠 Token info:", token_info)
 
-    # If token_info is dict, it means token request failed
     if isinstance(token_info, dict) and "error" in token_info:
         return JsonResponse(token_info, status=500)
 
@@ -61,18 +54,14 @@ def get_all_contacts(request):
         "Content-Type": "application/json",
     }
 
+    response = requests.get(url, headers=headers)
+
+    print("🟢 Contacts Response Code:", response.status_code)
+    print("🟢 Contacts Response Body:", response.text)
+
     try:
-        response = requests.get(url, headers=headers)
-        print("🟢 Contacts Response Code:", response.status_code)
-        print("🟢 Contacts Response Body:", response.text)
+        data = response.json()
+    except Exception:
+        data = {"raw_text": response.text}
 
-        try:
-            data = response.json()
-        except Exception:
-            data = {"raw_text": response.text}
-
-        return JsonResponse(data, safe=False, status=response.status_code)
-
-    except Exception as e:
-        print("❌ Exception in get_all_contacts:", str(e))
-        return JsonResponse({"error": str(e)}, status=500)
+    return JsonResponse(data, safe=False, status=response.status_code)
