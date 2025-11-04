@@ -4,51 +4,48 @@ import base64
 from datetime import datetime, timezone 
 import os
 import requests
-from django.http import JsonResponse
+import hashlib
+import base64
+from datetime import datetime, timezone
 
-def create_headers(method: str, full_path: str, client_id: str, client_secret: str):
+def create_headers(method, path, client_id, client_secret, fixed_date=None):
     """
-    Replicates Mekari's Postman HMAC header generator.
-    
-    Args:
-        method (str): HTTP method (GET, POST, PUT, etc.)
-        full_path (str): API path including query params (e.g. "/qontak/crm/contacts?page=1")
-        client_id (str): Mekari client ID
-        client_secret (str): Mekari client secret
-    
-    Returns:
-        dict: Headers including Authorization, Date, and Content-Type
+    Create Mekari-style HMAC authentication headers (100% validator compatible).
     """
-    # 1️⃣ Current GMT date in RFC1123 format (same as new Date().toUTCString())
-    dt = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
 
-    # 2️⃣ Build the request-line string: "GET /path?query HTTP/1.1"
-    request_line = f"{method.upper()} {full_path} HTTP/1.1"
+    # Mekari requires RFC 1123 date format (same as JS new Date().toUTCString())
+    dt = fixed_date or datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
 
-    # 3️⃣ Create payload like: "date: Mon, 03 Nov 2025 15:00:00 GMT\nGET /... HTTP/1.1"
-    payload = f"date: {dt}\n{request_line}"
+    # --- Construct the canonical request-line exactly ---
+    # e.g. GET /qontak/crm/contacts/info HTTP/1.1
+    request_line = method.upper() + " " + path + " HTTP/1.1"
 
-    # 4️⃣ Generate HMAC-SHA256 signature (base64 encoded)
+    # --- Signing string ---
+    # Must match Mekari's: "date: <date>\n<request_line>"
+    signing_string = "date: " + dt + "\n" + request_line
+
+    # --- Generate HMAC SHA256 signature ---
     signature_bytes = hmac.new(
         client_secret.encode("utf-8"),
-        payload.encode("utf-8"),
+        signing_string.encode("utf-8"),
         hashlib.sha256
     ).digest()
-    signature = base64.b64encode(signature_bytes).decode()
 
-    # 5️⃣ Construct Authorization header (identical to Mekari example)
+    signature = base64.b64encode(signature_bytes).decode("utf-8")
+
+    # --- Authorization Header ---
     authorization_header = (
-        f'hmac username="{client_id}", '
-        f'algorithm="hmac-sha256", '
-        f'headers="date request-line", '
-        f'signature="{signature}"'
+        'hmac username="' + client_id + '", '
+        'algorithm="hmac-sha256", '
+        'headers="date request-line", '
+        'signature="' + signature + '"'
     )
 
-    # 6️⃣ Return final headers
+    # --- Return headers ---
     return {
-        "Content-Type": "application/json",
-        "Date": dt,
         "Authorization": authorization_header,
+        "Date": dt,
+        "Content-Type": "application/json"
     }
 
 def get_all_contacts(request):

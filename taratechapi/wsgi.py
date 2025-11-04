@@ -29,7 +29,7 @@ os.environ['DEFAULT_FROM_EMAIL']='hello@taratech.id'
 
 os.environ['MEKARI_URL'] = 'api.mekari.com'
 os.environ['CQ_HOTPOT_QONTAK_CLIENT_ID'] = '4TkGVjzR25cDISZB'
-os.environ['CQ_HOTPOT_QONTAK_CLIENT_SECRET'] = 'FgW8fvfoiO3YAXwF1yWbNDXwGhmFROrl'
+os.environ['CQ_HOTPOT_QONTAK_CLIENT_SECRET'] = 'vbIsTl3KEO89IJ9cs8ZP9EWwk3okg5Ew'
 os.environ['CQ_HOTPOT_QONTAK_ACCESS_TOKEN'] = 'IPqU4f8KB-DMk54E9st0MPVtotZk4rB7Rq3L8eW1_08'
 os.environ['CQ_HOTPOT_QONTAK_REFRESH_TOKEN'] = 'uRmTxjVJ-XYQ8didFYr6_KXpiBTceeYyRqIZifkbVdU'
 
