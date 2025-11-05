@@ -12,7 +12,7 @@ from django.http import JsonResponse
 # --------------------------
 CLIENT_ID = os.getenv('CQ_HOTPOT_QONTAK_CLIENT_ID')
 CLIENT_SECRET = os.getenv('CQ_HOTPOT_QONTAK_CLIENT_SECRET')
-BASE_URL = "https://api.mekari.com"
+BASE_URL = "https://service-chat.qontak.com/api/open/v1/"
 
 
 # --------------------------
