@@ -12,6 +12,8 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 from pathlib import Path
 import os
+from datetime import timedelta
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -47,6 +49,9 @@ INSTALLED_APPS = [
     'nocantracker',
     'notifications',
     'chongqinghotpot',
+    'rest_framework',
+    'rest_framework_simplejwt',
+    'ecosuite',
 ]
 
 MIDDLEWARE = [
@@ -143,9 +148,23 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Zoho Mail settings
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 EMAIL_HOST = os.getenv("EMAIL_HOST")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT"))
-EMAIL_USE_SSL = bool(int(os.getenv("EMAIL_USE_SSL")))
-EMAIL_USE_TLS = bool(int(os.getenv("EMAIL_USE_TLS")))
+EMAIL_PORT = os.getenv("EMAIL_PORT")
+EMAIL_USE_SSL = bool(os.getenv("EMAIL_USE_SSL"))
+EMAIL_USE_TLS = bool(os.getenv("EMAIL_USE_TLS"))
 EMAIL_HOST_USER = os.getenv("ZOHO_EMAIL_USER")
 EMAIL_HOST_PASSWORD = os.getenv("ZOHO_EMAIL_PASS")
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL")
+
+AUTH_USER_MODEL = "ecosuite.EcosuiteUser"
+
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ),
+}
+
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=7),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
+    'AUTH_HEADER_TYPES': ('Bearer',),
+}

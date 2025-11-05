@@ -23,4 +23,6 @@ urlpatterns = [
      path("api/tracker/", include("nocantracker.urls")),
      path('api/notifications/', include('notifications.urls')),
      path('api/chongqinghotpot/', include('chongqinghotpot.urls')),
+     path('api/ecosuite/', include('ecosuite.urls')),
+     
 ]
