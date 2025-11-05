@@ -131,7 +131,7 @@ def example_usage():
     print(json.dumps(log_result["response"], indent=2))
 
 
-def get_all_contacts():
+def get_all_contacts(request):
     result = send_mekari_request(
     "GET",
     "/qontak/chat/v1/contacts/contact_lists/534bd3d4-5395-46a9-bfbb-353f3a7721be"
@@ -139,8 +139,4 @@ def get_all_contacts():
     print(result)
     return JsonResponse(result, safe=False, status=result["http_code"])
 
-# --------------------------
-# RUN EXAMPLE
-# --------------------------
-if __name__ == "__main__":
-    get_all_contacts()
+
