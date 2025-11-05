@@ -1,77 +1,146 @@
 import hmac
 import hashlib
 import base64
-from datetime import datetime, timezone 
-import os
 import requests
-from django.http import JsonResponse
-import hashlib
-import base64
+import json
 from datetime import datetime, timezone
+import time
+import os
+from django.http import JsonResponse
+# --------------------------
+# CONFIG
+# --------------------------
+CLIENT_ID = os.getenv('CQ_HOTPOT_QONTAK_CLIENT_ID')
+CLIENT_SECRET = os.getenv('CQ_HOTPOT_QONTAK_CLIENT_SECRET')
+BASE_URL = "https://api.mekari.com"
 
-def create_headers(method, path, client_id, client_secret, fixed_date=None):
+
+# --------------------------
+# HEADER GENERATOR
+# --------------------------
+def generate_headers(method: str, path: str, client_id: str, client_secret: str):
     """
-    Create Mekari-style HMAC authentication headers (100% validator compatible).
+    Generate HMAC authentication headers for Mekari Qontak API.
+    Equivalent to the PHP example's generate_headers().
     """
+    # RFC 7231 (GMT) date format
+    datetime_str = datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
 
-    # Mekari requires RFC 1123 date format (same as JS new Date().toUTCString())
-    dt = fixed_date or datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
-
-    # --- Construct the canonical request-line exactly ---
-    # e.g. GET /qontak/crm/contacts/info HTTP/1.1
+    # Canonical request line
     request_line = method.upper() + " " + path + " HTTP/1.1"
 
-    # --- Signing string ---
-    # Must match Mekari's: "date: <date>\n<request_line>"
-    signing_string = "date: " + dt + "\n" + request_line
+    # Signing string: "date: <date>\n<method> <path> HTTP/1.1"
+    signing_string = "date: " + datetime_str + "\n" + request_line
 
-    # --- Generate HMAC SHA256 signature ---
-    signature_bytes = hmac.new(
+    # HMAC-SHA256 digest and Base64 encode
+    digest_bytes = hmac.new(
         client_secret.encode("utf-8"),
         signing_string.encode("utf-8"),
         hashlib.sha256
     ).digest()
+    signature = base64.b64encode(digest_bytes).decode("utf-8")
 
-    signature = base64.b64encode(signature_bytes).decode("utf-8")
-
-    # --- Authorization Header ---
-    authorization_header = (
+    # Final Authorization header
+    authorization = (
         'hmac username="' + client_id + '", '
         'algorithm="hmac-sha256", '
         'headers="date request-line", '
         'signature="' + signature + '"'
     )
 
-    # --- Return headers ---
     return {
-        "Authorization": authorization_header,
-        "Date": dt,
+        "Authorization": authorization,
+        "Date": datetime_str,
         "Content-Type": "application/json"
     }
 
-def get_all_contacts(request):
+
+# --------------------------
+# REQUEST FUNCTION
+# --------------------------
+def send_mekari_request(method: str, path: str, payload: dict = None):
     """
-    Get all CRM contacts from Mekari (Qontak CRM)
+    Send a signed request to Mekari API (GET or POST).
+    Equivalent to the PHP send_mekari_request() function.
     """
+    url = BASE_URL + path
+    headers = generate_headers(method, path, CLIENT_ID, CLIENT_SECRET)
+
+    if method.upper() == "POST":
+        response = requests.post(url, headers=headers, json=payload)
+    elif method.upper() == "GET":
+        response = requests.get(url, headers=headers, params=payload)
+    else:
+        response = requests.request(method.upper(), url, headers=headers, json=payload)
+
     try:
-        client_id = os.getenv("CQ_HOTPOT_QONTAK_CLIENT_ID")
-        client_secret = os.getenv("CQ_HOTPOT_QONTAK_CLIENT_SECRET")
+        body = response.json()
+    except Exception:
+        body = response.text
 
-        path = "/qontak/crm/contacts/info"  # <-- from your example
-        headers = create_headers("GET", path, client_id, client_secret)
+    return {
+        "http_code": response.status_code,
+        "response": body
+    }
 
-        url = f"https://api.mekari.com{path}"
-        response = requests.get(url, headers=headers)
 
-        # Debugging info (optional)
-        print("Request URL:", url)
-        print("Headers:", headers)
-        print("Status Code:", response.status_code)
-        print("Response Text:", response.text)
-        
-        json_payload = response.json()
-        print("JSON Payload:", json_payload)
+# --------------------------
+# EXAMPLE USAGE
+# --------------------------
+def example_usage():
+    # Example 1: WhatsApp Broadcast (POST)
+    post_path = "/qontak/chat/v1/broadcasts/whatsapp/direct"
+    post_payload = {
+        "to_number": "62xxxxx",  # Replace with real number
+        "to_name": "Muhamad Iqbal",
+        "message_template_id": "fbd4da17-a20e-4248-993d-f95566ee10b2",
+        "channel_integration_id": "a2e9673a-44ac-493d-aac0-51c5a0bfb1a5",
+        "language": {"code": "id"},
+        "parameters": {
+            "body": [
+                {"key": "1", "value": "customer_name", "value_text": "Iqbal"},
+                {"key": "2", "value": "link_pdf", "value_text": "https://cdn.qontak.com/example.pdf"}
+            ]
+        }
+    }
 
-        return JsonResponse(json_payload, safe=False, status=response.status_code)
-    except Exception as e:
-        return JsonResponse({"error": str(e)}, status=500)
+    print("==[ Sending Broadcast (POST) ]==")
+    post_result = send_mekari_request("POST", post_path, post_payload)
+    print("Status Code:", post_result["http_code"])
+    print(json.dumps(post_result["response"], indent=2))
+
+    if post_result["http_code"] != 201:
+        print("❌ Failed to send broadcast.")
+        return
+
+    # Extract broadcast_id
+    broadcast_id = post_result["response"].get("data", {}).get("id")
+    if not broadcast_id:
+        print("❌ Broadcast ID not found.")
+        return
+
+    # Delay before log check
+    print("\nWaiting 10 seconds before checking log...\n")
+    time.sleep(10)
+
+    # Example 2: Get Broadcast Log (GET)
+    log_path = f"/qontak/chat/v1/broadcasts/{broadcast_id}/whatsapp/log"
+    print("==[ Getting Broadcast Log (GET) ]==")
+    log_result = send_mekari_request("GET", log_path)
+    print("Status Code:", log_result["http_code"])
+    print(json.dumps(log_result["response"], indent=2))
+
+
+def get_all_contacts():
+    result = send_mekari_request(
+    "GET",
+    "/qontak/chat/v1/contacts/contact_lists/534bd3d4-5395-46a9-bfbb-353f3a7721be"
+    )
+    print(result)
+    return JsonResponse(result, safe=False, status=result["http_code"])
+
+# --------------------------
+# RUN EXAMPLE
+# --------------------------
+if __name__ == "__main__":
+    get_all_contacts()
