@@ -68,7 +68,10 @@ def get_all_contacts(request):
         print("Headers:", headers)
         print("Status Code:", response.status_code)
         print("Response Text:", response.text)
+        
+        json_payload = response.json()
+        print("JSON Payload:", json_payload)
 
-        return JsonResponse(response.json(), safe=False, status=response.status_code)
+        return JsonResponse(json_payload, safe=False, status=response.status_code)
     except Exception as e:
         return JsonResponse({"error": str(e)}, status=500)
