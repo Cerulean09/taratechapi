@@ -61,7 +61,7 @@ def login_user(request):
         refresh = RefreshToken.for_user(request.user) if hasattr(request, 'user') and request.user.is_authenticated else RefreshToken()
         refresh['id'] = user['id']
         refresh['email'] = user['email']
-        refresh['full_name'] = user.get('full_name', '')
+        refresh['fullName'] = user.get('fullName', '')
         refresh['role'] = user.get('role', 'user')
 
         access_token = str(refresh.access_token)
@@ -74,7 +74,7 @@ def login_user(request):
             "user": {
                 "id": user["id"],
                 "email": user["email"],
-                "full_name": user.get("full_name", ""),
+                "fullName": user.get("fullName", ""),
             }
         }, status=status.HTTP_200_OK)
 
