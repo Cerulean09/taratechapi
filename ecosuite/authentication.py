@@ -1,6 +1,6 @@
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
-from rest_framework_simplejwt.tokens import UntypedToken
+from rest_framework_simplejwt.tokens import UntypedToken, AccessToken, RefreshToken
 from django.contrib.auth.models import AnonymousUser
 from django.utils.translation import gettext_lazy as _
 from typing import Tuple, Optional
@@ -56,7 +56,8 @@ class SupabaseJWTAuthentication(JWTAuthentication):
         wrapper object.
         """
         messages = []
-        for AuthToken in self.get_token_classes():
+        # Try AccessToken first, then RefreshToken
+        for AuthToken in [AccessToken, RefreshToken]:
             try:
                 return AuthToken(raw_token)
             except TokenError as e:
