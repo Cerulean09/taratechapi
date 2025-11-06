@@ -8,6 +8,7 @@ from supabase import create_client, Client, ClientOptions
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.permissions import IsAuthenticated
 import os
+from datetime import datetime, timedelta
 
 def create_supabase_client() -> Client:
     url = os.getenv('TARA_TECH_SUPABASE_CLIENT_URL')
@@ -52,24 +53,36 @@ def login_user(request):
 
         user = response.data[0]
 
-        # Step 2: Verify password using Django’s hasher
+        # Step 2: Verify password using Django's built-in hasher
         if not check_password(password, user['password']):
             return Response({"error": "Invalid email or password"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Step 3: Generate JWT token manually
-        # We don’t have a Django ORM user object here, so we’ll build a pseudo-claims payload
-        refresh = RefreshToken.for_user(request.user) if hasattr(request, 'user') and request.user.is_authenticated else RefreshToken()
+        # Step 3: Generate JWT tokens with Supabase user data in claims
+        # Create a token without Django user - we'll add all user data as claims
+        refresh = RefreshToken()
+        access = refresh.access_token
+
+        # Add all required user claims for authentication (using camelCase)
+        access['id'] = user['id']
+        access['email'] = user['email']
+        access['fullName'] = user.get('fullName', '')
+        access['role'] = user.get('role', 'user')
+        access['isActive'] = user.get('isActive', True)
+        access['phoneNumber'] = user.get('phoneNumber')
+        access['assignedBrandIds'] = user.get('assignedBrandIds', [])
+        access['assignedModuleIds'] = user.get('assignedModuleIds', [])
+        access['preferences'] = user.get('preferences', {})
+        access['dateJoined'] = user.get('dateJoined')
+        access['isPendingApproval'] = user.get('isPendingApproval', False)
+
+        # Add same claims to refresh token
         refresh['id'] = user['id']
         refresh['email'] = user['email']
-        refresh['fullName'] = user.get('fullName', '')
-        refresh['role'] = user.get('role', 'user')
 
-        access_token = str(refresh.access_token)
-
-        # Step 4: Return the tokens
+        # Step 5: Return both tokens
         return Response({
             "message": "Login successful",
-            "access": access_token,
+            "access": str(access),
             "refresh": str(refresh),
             "user": {
                 "id": user["id"],
@@ -84,9 +97,22 @@ def login_user(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def profile(request):
+    # request.user is now a SupabaseUser object from our custom authentication
     return Response({
         "message": "JWT verified successfully",
-        "user": request.user.id if hasattr(request.user, 'id') else "custom user",
+        "user": {
+            "id": request.user.id,
+            "email": request.user.email,
+            "fullName": request.user.fullName,
+            "role": request.user.role,
+            "isActive": request.user.isActive,
+            "phoneNumber": request.user.phoneNumber,
+            "assignedBrandIds": request.user.assignedBrandIds,
+            "assignedModuleIds": request.user.assignedModuleIds,
+            "preferences": request.user.preferences,
+            "dateJoined": request.user.dateJoined,
+            "isPendingApproval": request.user.isPendingApproval,
+        }
     })
 
 def logout_user(request):
