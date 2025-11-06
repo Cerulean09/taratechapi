@@ -12,8 +12,8 @@ class EcosuiteUserManager(BaseUserManager):
         return user
 
     def create_superuser(self, email, password=None, **extra_fields):
-        extra_fields.setdefault("is_staff", True)
-        extra_fields.setdefault("is_superuser", True)
+        extra_fields.setdefault("istaff", True)
+        extra_fields.setdefault("isSuperuser", True)
         return self.create_user(email, password, **extra_fields)
 
 class EcosuiteUser(AbstractBaseUser, PermissionsMixin):
