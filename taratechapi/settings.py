@@ -49,7 +49,6 @@ INSTALLED_APPS = [
     'nocantracker',
     'notifications',
     'chongqinghotpot',
-    'rest_framework',
     'rest_framework_simplejwt',
     'ecosuite',
 ]
@@ -98,8 +97,12 @@ WSGI_APPLICATION = 'taratechapi.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'ecosuite_db',
+        'USER': 'taratech',
+        'PASSWORD': 'TaraTech2025',
+        'HOST': 'ecosuite.taratech.id',
+        'PORT': '5432',
     }
 }
 

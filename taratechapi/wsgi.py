@@ -33,4 +33,8 @@ os.environ['CQ_HOTPOT_QONTAK_CLIENT_SECRET'] = 'vbIsTl3KEO89IJ9cs8ZP9EWwk3okg5Ew
 os.environ['CQ_HOTPOT_QONTAK_ACCESS_TOKEN'] = 'IPqU4f8KB-DMk54E9st0MPVtotZk4rB7Rq3L8eW1_08'
 os.environ['CQ_HOTPOT_QONTAK_REFRESH_TOKEN'] = 'uRmTxjVJ-XYQ8didFYr6_KXpiBTceeYyRqIZifkbVdU'
 
+# supabase client
+os.environ['TARA_TECH_SUPABASE_CLIENT_URL']='https://pkycvberbshcddypsjxg.supabase.co'
+os.environ['TARA_TECH_SUPABASE_CLIENT_SECRET']='sb_publishable_V_omaFKB2MNF3nXVeada4A_8p_sPsY2'
+
 application = get_wsgi_application()
