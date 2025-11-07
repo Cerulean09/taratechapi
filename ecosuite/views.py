@@ -8,6 +8,7 @@ from supabase import create_client, Client, ClientOptions
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.permissions import IsAuthenticated
 import os
+import uuid
 from datetime import datetime, timedelta
 
 def create_supabase_client() -> Client:
@@ -157,7 +158,7 @@ def update_user(request, user_id):
         
         # Update timestamp if field exists
         if 'updatedAt' in data or 'dateJoined' in data:
-            data['updatedAt'] = datetime.utcnow().isoformat()
+            data['updatedAt'] = datetime.isoformat()
         
         # Update user
         response = supabase.table('ecosuite_users').update(data).eq('id', user_id).execute()
@@ -292,17 +293,167 @@ def update_brand(request, brand_id):
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-@api_view(['DELETE'])
+@api_view(['PUT'])
 @permission_classes([IsAuthenticated])
-def delete_brand(request, brand_id):
-    """Delete a brand"""
+def suspend_brand(request, brand_id):
+    """Suspend a brand (set status to 'suspended' instead of deleting)"""
     supabase = create_supabase_client()
     try:
-        response = supabase.table('ecosuite_brands').delete().eq('id', brand_id).execute()
+        data = {
+            'status': 'suspended',
+            'updatedAt': datetime.utcnow().isoformat(),
+            'updatedBy': request.user.id
+        }
+        
+        response = supabase.table('ecosuite_brands').update(data).eq('id', brand_id).execute()
         
         if response.data:
             return Response({
-                "message": "Brand deleted successfully"
+                "message": "Brand suspended successfully",
+                "brand": response.data[0]
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({"error": "Brand not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST', 'PUT'])
+@permission_classes([IsAuthenticated])
+def upsert_brand(request):
+    """Add or update a brand. If id is provided, updates existing brand; otherwise creates new one."""
+    supabase = create_supabase_client()
+    try:
+        data = request.data.copy()
+        
+        # Ensure required fields
+        if not data.get('name'):
+            return Response({"error": "Brand name is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        brand_id = data.get('id')
+        now = datetime.utcnow().isoformat()
+        
+        if brand_id:
+            # Update existing brand
+            # Remove id from data for update
+            update_data = {k: v for k, v in data.items() if k != 'id'}
+            update_data['updatedAt'] = now
+            
+            # Set updatedBy from authenticated user if not provided
+            if 'updatedBy' not in update_data:
+                update_data['updatedBy'] = request.user.id
+            
+            # Ensure status is valid (don't allow deletion, only suspend)
+            if 'status' in update_data and update_data['status'] == 'deleted':
+                update_data['status'] = 'suspended'
+            
+            response = supabase.table('ecosuite_brands').update(update_data).eq('id', brand_id).execute()
+            
+            if response.data:
+                return Response({
+                    "message": "Brand updated successfully",
+                    "brand": response.data[0]
+                }, status=status.HTTP_200_OK)
+            else:
+                return Response({"error": "Brand not found"}, status=status.HTTP_404_NOT_FOUND)
+        else:
+            # Create new brand
+            # Generate new ID if not provided
+            if 'id' not in data:
+                data['id'] = str(uuid.uuid4())
+            
+            # Set timestamps
+            if 'createdAt' not in data:
+                data['createdAt'] = now
+            if 'updatedAt' not in data:
+                data['updatedAt'] = now
+            
+            # Set createdBy/updatedBy from authenticated user if not provided
+            if 'createdBy' not in data:
+                data['createdBy'] = request.user.id
+            if 'updatedBy' not in data:
+                data['updatedBy'] = request.user.id
+            
+            # Ensure default values
+            if 'status' not in data:
+                data['status'] = 'active'
+            if 'outletIds' not in data:
+                data['outletIds'] = []
+            if 'userIds' not in data:
+                data['userIds'] = []
+            if 'moduleAccess' not in data:
+                data['moduleAccess'] = {}
+            
+            # Insert brand
+            response = supabase.table('ecosuite_brands').insert(data).execute()
+            
+            if response.data:
+                return Response({
+                    "message": "Brand created successfully",
+                    "brand": response.data[0]
+                }, status=status.HTTP_201_CREATED)
+            else:
+                return Response({"error": "Failed to create brand"}, status=status.HTTP_400_BAD_REQUEST)
+            
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def upload_brand_logo(request, brand_id):
+    """Upload a brand logo to Supabase Storage"""
+    supabase = create_supabase_client()
+    try:
+        # Check if file is provided
+        if 'logo' not in request.FILES:
+            return Response({"error": "Logo file is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        logo_file = request.FILES['logo']
+        
+        # Validate file type (optional - you can add more validation)
+        allowed_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg']
+        file_extension = os.path.splitext(logo_file.name)[1].lower()
+        if file_extension not in allowed_extensions:
+            return Response({
+                "error": f"Invalid file type. Allowed types: {', '.join(allowed_extensions)}"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Generate unique filename
+        file_id = str(uuid.uuid4())
+        file_name = f"{file_id}{file_extension}"
+        storage_path = f"logos/{file_name}"
+        
+        # Read file content as bytes
+        file_content = logo_file.read()
+        
+        # Upload to Supabase Storage
+        # Note: The bucket name should match your Supabase storage bucket
+        storage_response = supabase.storage.from_('ecosuite-brand-documents').upload(
+            path=storage_path,
+            file=file_content,
+            file_options={"content-type": logo_file.content_type}
+        )
+        
+        # Get public URL - construct it from Supabase URL
+        supabase_url = os.getenv('TARA_TECH_SUPABASE_CLIENT_URL')
+        # Remove trailing slash if present
+        supabase_url = supabase_url.rstrip('/')
+        logo_url = f"{supabase_url}/storage/v1/object/public/ecosuite-brand-documents/{storage_path}"
+        
+        # Update brand with logo URL
+        update_data = {
+            'logoUrl': logo_url,
+            'updatedAt': datetime.utcnow().isoformat(),
+            'updatedBy': request.user.id
+        }
+        
+        brand_response = supabase.table('ecosuite_brands').update(update_data).eq('id', brand_id).execute()
+        
+        if brand_response.data:
+            return Response({
+                "message": "Logo uploaded successfully",
+                "logoUrl": logo_url,
+                "brand": brand_response.data[0]
             }, status=status.HTTP_200_OK)
         else:
             return Response({"error": "Brand not found"}, status=status.HTTP_404_NOT_FOUND)
