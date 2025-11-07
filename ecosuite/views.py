@@ -122,3 +122,155 @@ def logout_user(request):
         return Response({"message": "Logout successful"}, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_all_users(request):
+    """Get all users"""
+    supabase = create_supabase_client()
+    try:
+        response = supabase.table('ecosuite_users').select('*').execute()
+        users = response.data if response.data else []
+        
+        # Remove password field from each user for security
+        for user in users:
+            if 'password' in user:
+                del user['password']
+        
+        return Response({
+            "users": users
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+# ======================================================
+# Brand Management Views
+# ======================================================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_all_brands(request):
+    """Get all brands"""
+    supabase = create_supabase_client()
+    try:
+        response = supabase.table('ecosuite_brands').select('*').execute()
+        brands = response.data if response.data else []
+        
+        return Response({
+            "brands": brands
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_brand(request, brand_id):
+    """Get a single brand by ID"""
+    supabase = create_supabase_client()
+    try:
+        response = supabase.table('ecosuite_brands').select('*').eq('id', brand_id).execute()
+        
+        if response.data and len(response.data) > 0:
+            return Response({
+                "brand": response.data[0]
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({"error": "Brand not found"}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_brand(request):
+    """Create a new brand"""
+    supabase = create_supabase_client()
+    try:
+        data = request.data.copy()
+        
+        # Ensure required fields
+        if not data.get('name'):
+            return Response({"error": "Brand name is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Set timestamps if not provided
+        now = datetime.utcnow().isoformat()
+        if 'createdAt' not in data:
+            data['createdAt'] = now
+        if 'updatedAt' not in data:
+            data['updatedAt'] = now
+        
+        # Set createdBy/updatedBy from authenticated user if not provided
+        if 'createdBy' not in data:
+            data['createdBy'] = request.user.id
+        if 'updatedBy' not in data:
+            data['updatedBy'] = request.user.id
+        
+        # Ensure default values
+        if 'status' not in data:
+            data['status'] = 'active'
+        if 'outletIds' not in data:
+            data['outletIds'] = []
+        if 'userIds' not in data:
+            data['userIds'] = []
+        if 'moduleAccess' not in data:
+            data['moduleAccess'] = {}
+        
+        # Insert brand
+        response = supabase.table('ecosuite_brands').insert(data).execute()
+        
+        if response.data:
+            return Response({
+                "message": "Brand created successfully",
+                "brand": response.data[0]
+            }, status=status.HTTP_201_CREATED)
+        else:
+            return Response({"error": "Failed to create brand"}, status=status.HTTP_400_BAD_REQUEST)
+            
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+def update_brand(request, brand_id):
+    """Update an existing brand"""
+    supabase = create_supabase_client()
+    try:
+        data = request.data.copy()
+        
+        # Update timestamp
+        data['updatedAt'] = datetime.utcnow().isoformat()
+        
+        # Set updatedBy from authenticated user if not provided
+        if 'updatedBy' not in data:
+            data['updatedBy'] = request.user.id
+        
+        # Update brand
+        response = supabase.table('ecosuite_brands').update(data).eq('id', brand_id).execute()
+        
+        if response.data:
+            return Response({
+                "message": "Brand updated successfully",
+                "brand": response.data[0]
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({"error": "Brand not found or update failed"}, status=status.HTTP_404_NOT_FOUND)
+            
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_brand(request, brand_id):
+    """Delete a brand"""
+    supabase = create_supabase_client()
+    try:
+        response = supabase.table('ecosuite_brands').delete().eq('id', brand_id).execute()
+        
+        if response.data:
+            return Response({
+                "message": "Brand deleted successfully"
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({"error": "Brand not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
