@@ -143,6 +143,41 @@ def get_all_users(request):
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+def update_user(request, user_id):
+    """Update an existing user"""
+    supabase = create_supabase_client()
+    try:
+        data = request.data.copy()
+        
+        # Hash password if provided
+        if 'password' in data and data['password']:
+            data['password'] = make_password(data['password'])
+        
+        # Update timestamp if field exists
+        if 'updatedAt' in data or 'dateJoined' in data:
+            data['updatedAt'] = datetime.utcnow().isoformat()
+        
+        # Update user
+        response = supabase.table('ecosuite_users').update(data).eq('id', user_id).execute()
+        
+        if response.data:
+            # Remove password from response for security
+            user_data = response.data[0].copy()
+            if 'password' in user_data:
+                del user_data['password']
+            
+            return Response({
+                "message": "User updated successfully",
+                "user": user_data
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({"error": "User not found or update failed"}, status=status.HTTP_404_NOT_FOUND)
+            
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
 # ======================================================
 # Brand Management Views
 # ======================================================

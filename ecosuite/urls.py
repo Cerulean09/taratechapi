@@ -9,6 +9,7 @@ urlpatterns = [
     path('logout/', views.logout_user),
     path('profile/', views.profile),
     path('get-all-users/', views.get_all_users, name='get_all_users'),
+    path('update-user/<str:user_id>/', views.update_user, name='update_user'),
     
     # Brand Management Endpoints
     path('admin/brands/', views.get_all_brands, name='get_all_brands'),
