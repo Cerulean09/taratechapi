@@ -158,7 +158,7 @@ def update_user(request, user_id):
         
         # Update timestamp if field exists
         if 'updatedAt' in data or 'dateJoined' in data:
-            data['updatedAt'] = datetime.isoformat()
+            data['updatedAt'] = datetime.now().isoformat()
         
         # Update user
         response = supabase.table('ecosuite_users').update(data).eq('id', user_id).execute()
@@ -228,7 +228,7 @@ def create_brand(request):
             return Response({"error": "Brand name is required"}, status=status.HTTP_400_BAD_REQUEST)
         
         # Set timestamps if not provided
-        now = datetime.isoformat()
+        now = datetime.now().isoformat()
         if 'createdAt' not in data:
             data['createdAt'] = now
         if 'updatedAt' not in data:
@@ -273,7 +273,7 @@ def update_brand(request, brand_id):
         data = request.data.copy()
         
         # Update timestamp
-        data['updatedAt'] = datetime.isoformat()
+        data['updatedAt'] = datetime.now().isoformat()
         
         # Set updatedBy from authenticated user if not provided
         if 'updatedBy' not in data:
@@ -301,7 +301,7 @@ def suspend_brand(request, brand_id):
     try:
         data = {
             'status': 'suspended',
-            'updatedAt': datetime.isoformat(),
+            'updatedAt': datetime.now().isoformat(),
             'updatedBy': request.user.id
         }
         
@@ -331,7 +331,7 @@ def upsert_brand(request):
             return Response({"error": "Brand name is required"}, status=status.HTTP_400_BAD_REQUEST)
         
         brand_id = data.get('id')
-        now = datetime.isoformat()
+        now = datetime.now().isoformat()
         
         if brand_id:
             # Update existing brand
@@ -443,7 +443,7 @@ def upload_brand_logo(request, brand_id):
         # Update brand with logo URL
         update_data = {
             'logoUrl': logo_url,
-            'updatedAt': datetime.isoformat(),
+            'updatedAt': datetime.now().isoformat(),
             'updatedBy': request.user.id
         }
         
