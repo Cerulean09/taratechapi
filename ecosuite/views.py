@@ -228,7 +228,7 @@ def create_brand(request):
             return Response({"error": "Brand name is required"}, status=status.HTTP_400_BAD_REQUEST)
         
         # Set timestamps if not provided
-        now = datetime.utcnow().isoformat()
+        now = datetime.isoformat()
         if 'createdAt' not in data:
             data['createdAt'] = now
         if 'updatedAt' not in data:
@@ -243,8 +243,8 @@ def create_brand(request):
         # Ensure default values
         if 'status' not in data:
             data['status'] = 'active'
-        if 'outletIds' not in data:
-            data['outletIds'] = []
+        if 'outlets' not in data:
+            data['outlets'] = []
         if 'userIds' not in data:
             data['userIds'] = []
         if 'moduleAccess' not in data:
@@ -273,7 +273,7 @@ def update_brand(request, brand_id):
         data = request.data.copy()
         
         # Update timestamp
-        data['updatedAt'] = datetime.utcnow().isoformat()
+        data['updatedAt'] = datetime.isoformat()
         
         # Set updatedBy from authenticated user if not provided
         if 'updatedBy' not in data:
@@ -301,7 +301,7 @@ def suspend_brand(request, brand_id):
     try:
         data = {
             'status': 'suspended',
-            'updatedAt': datetime.utcnow().isoformat(),
+            'updatedAt': datetime.isoformat(),
             'updatedBy': request.user.id
         }
         
@@ -331,7 +331,7 @@ def upsert_brand(request):
             return Response({"error": "Brand name is required"}, status=status.HTTP_400_BAD_REQUEST)
         
         brand_id = data.get('id')
-        now = datetime.utcnow().isoformat()
+        now = datetime.isoformat()
         
         if brand_id:
             # Update existing brand
@@ -360,7 +360,7 @@ def upsert_brand(request):
             # Create new brand
             # Generate new ID if not provided
             if 'id' not in data:
-                data['id'] = str(uuid.uuid4())
+                return Response({"error": "Brand ID is required"}, status=status.HTTP_400_BAD_REQUEST)
             
             # Set timestamps
             if 'createdAt' not in data:
@@ -377,8 +377,8 @@ def upsert_brand(request):
             # Ensure default values
             if 'status' not in data:
                 data['status'] = 'active'
-            if 'outletIds' not in data:
-                data['outletIds'] = []
+            if 'outlets' not in data:
+                data['outlets'] = []
             if 'userIds' not in data:
                 data['userIds'] = []
             if 'moduleAccess' not in data:
@@ -443,7 +443,7 @@ def upload_brand_logo(request, brand_id):
         # Update brand with logo URL
         update_data = {
             'logoUrl': logo_url,
-            'updatedAt': datetime.utcnow().isoformat(),
+            'updatedAt': datetime.isoformat(),
             'updatedBy': request.user.id
         }
         
