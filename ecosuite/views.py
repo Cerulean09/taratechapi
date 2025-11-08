@@ -460,3 +460,66 @@ def upload_brand_logo(request, brand_id):
             
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def upload_brand_floor_image(request, brand_id):
+    """Upload a brand floor plan image to Supabase Storage"""
+    supabase = create_supabase_client()
+    try:
+        # Check if file is provided
+        if 'floorImage' not in request.FILES:
+            return Response({"error": "Floor image file is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        floor_image_file = request.FILES['floorImage']
+        
+        # Validate file type (optional - you can add more validation)
+        allowed_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg']
+        file_extension = os.path.splitext(floor_image_file.name)[1].lower()
+        if file_extension not in allowed_extensions:
+            return Response({
+                "error": f"Invalid file type. Allowed types: {', '.join(allowed_extensions)}"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Generate unique filename
+        file_id = str(uuid.uuid4())
+        file_name = f"{file_id}{file_extension}"
+        storage_path = f"floor-plans/{file_name}"
+        
+        # Read file content as bytes
+        file_content = floor_image_file.read()
+        
+        # Upload to Supabase Storage
+        # Note: The bucket name should match your Supabase storage bucket
+        storage_response = supabase.storage.from_('ecosuite-brand-documents').upload(
+            path=storage_path,
+            file=file_content,
+            file_options={"content-type": floor_image_file.content_type}
+        )
+        
+        # Get public URL - construct it from Supabase URL
+        supabase_url = os.getenv('TARA_TECH_SUPABASE_CLIENT_URL')
+        # Remove trailing slash if present
+        supabase_url = supabase_url.rstrip('/')
+        floor_image_url = f"{supabase_url}/storage/v1/object/public/ecosuite-brand-documents/{storage_path}"
+        
+        # Update brand with floor image URL
+        update_data = {
+            'floorImageUrl': floor_image_url,
+            'updatedAt': datetime.now().isoformat(),
+            'updatedBy': request.user.id
+        }
+        
+        brand_response = supabase.table('ecosuite_brands').update(update_data).eq('id', brand_id).execute()
+        
+        if brand_response.data:
+            return Response({
+                "message": "Floor image uploaded successfully",
+                "floorImageUrl": floor_image_url,
+                "brand": brand_response.data[0]
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({"error": "Brand not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)

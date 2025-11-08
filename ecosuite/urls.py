@@ -19,4 +19,5 @@ urlpatterns = [
     path('suspend-brand/<str:brand_id>/', views.suspend_brand, name='suspend_brand'),
     path('upsert-brand/', views.upsert_brand, name='upsert_brand'),
     path('upload-brand-logo/<str:brand_id>/', views.upload_brand_logo, name='upload_brand_logo'),
+    path('upload-brand-floor-image/<str:brand_id>/', views.upload_brand_floor_image, name='upload_brand_floor_image'),
 ]
