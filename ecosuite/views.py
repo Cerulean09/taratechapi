@@ -523,3 +523,100 @@ def upload_brand_floor_image(request, brand_id):
             
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def upload_outlet_floor_image(request, outlet_id):
+    """Upload an outlet floor plan image to Supabase Storage"""
+    supabase = create_supabase_client()
+    try:
+        # Check if file is provided
+        if 'floorImage' not in request.FILES:
+            return Response({"error": "Floor image file is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        floor_image_file = request.FILES['floorImage']
+        
+        # Validate file type (optional - you can add more validation)
+        allowed_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg']
+        file_extension = os.path.splitext(floor_image_file.name)[1].lower()
+        if file_extension not in allowed_extensions:
+            return Response({
+                "error": f"Invalid file type. Allowed types: {', '.join(allowed_extensions)}"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Generate unique filename
+        file_id = str(uuid.uuid4())
+        file_name = f"{file_id}{file_extension}"
+        storage_path = f"outlet-floor-plans/{file_name}"
+        
+        # Read file content as bytes
+        file_content = floor_image_file.read()
+        
+        # Upload to Supabase Storage
+        # Note: The bucket name should match your Supabase storage bucket
+        storage_response = supabase.storage.from_('ecosuite-brand-documents').upload(
+            path=storage_path,
+            file=file_content,
+            file_options={"content-type": floor_image_file.content_type}
+        )
+        
+        # Get public URL - construct it from Supabase URL
+        supabase_url = os.getenv('TARA_TECH_SUPABASE_CLIENT_URL')
+        # Remove trailing slash if present
+        supabase_url = supabase_url.rstrip('/')
+        floor_image_url = f"{supabase_url}/storage/v1/object/public/ecosuite-brand-documents/{storage_path}"
+        
+        # Find the brand that contains this outlet
+        brands_response = supabase.table('ecosuite_brands').select('*').execute()
+        
+        if not brands_response.data:
+            return Response({"error": "No brands found"}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Search through all brands to find the one containing this outlet
+        brand_found = None
+        outlet_found = None
+        outlet_index = -1
+        
+        for brand in brands_response.data:
+            outlets = brand.get('outlets', [])
+            if isinstance(outlets, list):
+                for idx, outlet in enumerate(outlets):
+                    if isinstance(outlet, dict) and outlet.get('id') == outlet_id:
+                        brand_found = brand
+                        outlet_found = outlet
+                        outlet_index = idx
+                        break
+                if brand_found:
+                    break
+        
+        if not brand_found or not outlet_found:
+            return Response({"error": "Outlet not found"}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Update the outlet's floorImageUrl
+        outlet_found['floorImageUrl'] = floor_image_url
+        
+        # Update the outlets array in the brand
+        outlets = brand_found.get('outlets', [])
+        outlets[outlet_index] = outlet_found
+        
+        # Update the brand with the modified outlets array
+        update_data = {
+            'outlets': outlets,
+            'updatedAt': datetime.now().isoformat(),
+            'updatedBy': request.user.id
+        }
+        
+        brand_response = supabase.table('ecosuite_brands').update(update_data).eq('id', brand_found['id']).execute()
+        
+        if brand_response.data:
+            return Response({
+                "message": "Outlet floor image uploaded successfully",
+                "floorImageUrl": floor_image_url,
+                "outlet": outlet_found,
+                "brand": brand_response.data[0]
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({"error": "Failed to update brand"}, status=status.HTTP_400_BAD_REQUEST)
+            
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)

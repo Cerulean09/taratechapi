@@ -20,4 +20,5 @@ urlpatterns = [
     path('upsert-brand/', views.upsert_brand, name='upsert_brand'),
     path('upload-brand-logo/<str:brand_id>/', views.upload_brand_logo, name='upload_brand_logo'),
     path('upload-brand-floor-image/<str:brand_id>/', views.upload_brand_floor_image, name='upload_brand_floor_image'),
+    path('upload-outlet-floor-image/<str:outlet_id>/', views.upload_outlet_floor_image, name='upload_outlet_floor_image'),
 ]
