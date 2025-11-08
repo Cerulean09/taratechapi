@@ -534,6 +534,14 @@ def upload_outlet_floor_image(request, outlet_id):
         if 'floorImage' not in request.FILES:
             return Response({"error": "Floor image file is required"}, status=status.HTTP_400_BAD_REQUEST)
         
+        # Check if floorNumber is provided
+        floor_number = request.data.get('floorNumber')
+        if not floor_number:
+            return Response({"error": "Floor number is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Convert floor number to string (keys in JSON should be strings)
+        floor_number = str(floor_number)
+        
         floor_image_file = request.FILES['floorImage']
         
         # Validate file type (optional - you can add more validation)
@@ -592,8 +600,16 @@ def upload_outlet_floor_image(request, outlet_id):
         if not brand_found or not outlet_found:
             return Response({"error": "Outlet not found"}, status=status.HTTP_404_NOT_FOUND)
         
-        # Update the outlet's floorImageUrl
-        outlet_found['floorImageUrl'] = floor_image_url
+        # Get or initialize floorLayoutImages
+        floor_layout_images = outlet_found.get('floorLayoutImages', {})
+        if not isinstance(floor_layout_images, dict):
+            floor_layout_images = {}
+        
+        # Update the floorLayoutImages with the new image URL for this floor number
+        floor_layout_images[floor_number] = floor_image_url
+        
+        # Update the outlet's floorLayoutImages
+        outlet_found['floorLayoutImages'] = floor_layout_images
         
         # Update the outlets array in the brand
         outlets = brand_found.get('outlets', [])
@@ -611,7 +627,9 @@ def upload_outlet_floor_image(request, outlet_id):
         if brand_response.data:
             return Response({
                 "message": "Outlet floor image uploaded successfully",
+                "floorNumber": floor_number,
                 "floorImageUrl": floor_image_url,
+                "floorLayoutImages": floor_layout_images,
                 "outlet": outlet_found,
                 "brand": brand_response.data[0]
             }, status=status.HTTP_200_OK)
