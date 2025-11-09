@@ -823,3 +823,108 @@ def upsert_table(request, table_id):
             
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST', 'PUT', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def upsert_reservation(request, reservation_id):
+    """Insert or update a reservation. If reservation exists, updates it; otherwise creates a new one."""
+    supabase = create_supabase_client()
+    try:
+        data = request.data.copy()
+        
+        # Check if reservation exists
+        existing_response = supabase.table('ecosuite_reservations').select('*').eq('id', reservation_id).execute()
+        is_new_reservation = not existing_response.data or len(existing_response.data) == 0
+        
+        now = datetime.now().isoformat()
+        
+        if is_new_reservation:
+            # Create new reservation
+            # Ensure required fields
+            if not data.get('brandId'):
+                return Response({"error": "brandId is required"}, status=status.HTTP_400_BAD_REQUEST)
+            if not data.get('outletId'):
+                return Response({"error": "outletId is required"}, status=status.HTTP_400_BAD_REQUEST)
+            if not data.get('customerName'):
+                return Response({"error": "customerName is required"}, status=status.HTTP_400_BAD_REQUEST)
+            if not data.get('customerPhone'):
+                return Response({"error": "customerPhone is required"}, status=status.HTTP_400_BAD_REQUEST)
+            if not data.get('numberOfGuests'):
+                return Response({"error": "numberOfGuests is required"}, status=status.HTTP_400_BAD_REQUEST)
+            if not data.get('reservationDateTime'):
+                return Response({"error": "reservationDateTime is required"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            reservation_data = {
+                'id': reservation_id,
+                'brandId': data.get('brandId'),
+                'outletId': data.get('outletId'),
+                'customerName': data.get('customerName'),
+                'customerPhone': data.get('customerPhone'),
+                'numberOfGuests': data.get('numberOfGuests'),
+                'reservationDateTime': data.get('reservationDateTime'),
+                'status': data.get('status', 'pending'),
+                'tableId': data.get('tableId'),
+                'notes': data.get('notes'),
+                'utcOffset': data.get('utcOffset'),
+                'createdAt': data.get('createdAt', now),
+                'updatedAt': now,
+                'createdBy': request.user.id,
+                'updatedBy': request.user.id
+            }
+            
+            # Insert reservation
+            response = supabase.table('ecosuite_reservations').insert(reservation_data).execute()
+            
+            if response.data:
+                return Response({
+                    "message": "Reservation created successfully",
+                    "reservation": response.data[0]
+                }, status=status.HTTP_201_CREATED)
+            else:
+                return Response({"error": "Failed to create reservation"}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            # Update existing reservation
+            existing_reservation = existing_response.data[0]
+            
+            # Update fields, preserving existing values if not provided
+            # Use 'in' check to allow None values to be set explicitly
+            update_data = {
+                'updatedAt': now,
+                'updatedBy': request.user.id
+            }
+            
+            # Only update fields that are provided in the request
+            if 'brandId' in data:
+                update_data['brandId'] = data.get('brandId')
+            if 'outletId' in data:
+                update_data['outletId'] = data.get('outletId')
+            if 'customerName' in data:
+                update_data['customerName'] = data.get('customerName')
+            if 'customerPhone' in data:
+                update_data['customerPhone'] = data.get('customerPhone')
+            if 'numberOfGuests' in data:
+                update_data['numberOfGuests'] = data.get('numberOfGuests')
+            if 'reservationDateTime' in data:
+                update_data['reservationDateTime'] = data.get('reservationDateTime')
+            if 'status' in data:
+                update_data['status'] = data.get('status')
+            if 'tableId' in data:
+                update_data['tableId'] = data.get('tableId')
+            if 'notes' in data:
+                update_data['notes'] = data.get('notes')
+            if 'utcOffset' in data:
+                update_data['utcOffset'] = data.get('utcOffset')
+            
+            # Update reservation
+            response = supabase.table('ecosuite_reservations').update(update_data).eq('id', reservation_id).execute()
+            
+            if response.data:
+                return Response({
+                    "message": "Reservation updated successfully",
+                    "reservation": response.data[0]
+                }, status=status.HTTP_200_OK)
+            else:
+                return Response({"error": "Failed to update reservation"}, status=status.HTTP_400_BAD_REQUEST)
+            
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)

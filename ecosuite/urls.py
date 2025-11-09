@@ -24,4 +24,7 @@ urlpatterns = [
     
     # Table Management Endpoints
     path('upsert-table/<str:table_id>/', views.upsert_table, name='upsert_table'),
+    
+    # Reservation Management Endpoints
+    path('upsert-reservation/<str:reservation_id>/', views.upsert_reservation, name='upsert_reservation'),
 ]
