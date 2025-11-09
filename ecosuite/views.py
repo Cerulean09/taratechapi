@@ -638,3 +638,188 @@ def upload_outlet_floor_image(request, outlet_id):
             
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['POST', 'PUT', 'PATCH'])
+@permission_classes([IsAuthenticated])
+def upsert_table(request, table_id):
+    """Insert or update a table. If table exists, updates it; otherwise creates a new one."""
+    supabase = create_supabase_client()
+    try:
+        data = request.data.copy()
+        
+        # Find the brand that contains the outlet that contains this table
+        brands_response = supabase.table('ecosuite_brands').select('*').execute()
+        
+        if not brands_response.data:
+            return Response({"error": "No brands found"}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Search through all brands to find the one containing this table
+        brand_found = None
+        outlet_found = None
+        outlet_index = -1
+        table_found = None
+        floor_number = None
+        table_index = -1
+        is_new_table = False
+        
+        for brand in brands_response.data:
+            outlets = brand.get('outlets', [])
+            if isinstance(outlets, list):
+                for outlet_idx, outlet in enumerate(outlets):
+                    if isinstance(outlet, dict):
+                        tables_map = outlet.get('tables', {})
+                        if isinstance(tables_map, dict):
+                            # Search through all floors in the tables map
+                            for floor_num_str, tables_list in tables_map.items():
+                                if isinstance(tables_list, list):
+                                    for table_idx, table in enumerate(tables_list):
+                                        if isinstance(table, dict) and table.get('id') == table_id:
+                                            brand_found = brand
+                                            outlet_found = outlet
+                                            outlet_index = outlet_idx
+                                            table_found = table
+                                            floor_number = floor_num_str
+                                            table_index = table_idx
+                                            break
+                                    if table_found:
+                                        break
+                        if table_found:
+                            break
+                if table_found:
+                    break
+        
+        # If table not found, we need to create it
+        if not table_found:
+            is_new_table = True
+            
+            # For new table, we need outletId and floorNumber from request
+            outlet_id = data.get('outletId')
+            floor_number = str(data.get('floorNumber', '1'))  # Default to floor 1 if not provided
+            
+            if not outlet_id:
+                return Response({"error": "outletId is required for new tables"}, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Find the outlet
+            for brand in brands_response.data:
+                outlets = brand.get('outlets', [])
+                if isinstance(outlets, list):
+                    for outlet_idx, outlet in enumerate(outlets):
+                        if isinstance(outlet, dict) and outlet.get('id') == outlet_id:
+                            brand_found = brand
+                            outlet_found = outlet
+                            outlet_index = outlet_idx
+                            break
+                    if outlet_found:
+                        break
+            
+            if not brand_found or not outlet_found:
+                return Response({"error": "Outlet not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+            # Create new table
+            now = datetime.now().isoformat()
+            table_found = {
+                'id': table_id,
+                'brandId': outlet_found.get('brandId', brand_found.get('id')),
+                'outletId': outlet_id,
+                'name': data.get('name', ''),
+                'capacity': data.get('capacity', 0),
+                'status': data.get('status', 'available'),
+                'currentReservationId': data.get('currentReservationId'),
+                'layoutPosition': data.get('layoutPosition'),
+                'createdAt': data.get('createdAt', now),
+                'updatedAt': now,
+                'createdBy': request.user.id,
+                'updatedBy': request.user.id
+            }
+        
+        # Update the table with new data (for both new and existing tables)
+        table_found.update({
+            'name': data.get('name', table_found.get('name', '')),
+            'capacity': data.get('capacity', table_found.get('capacity', 0)),
+            'status': data.get('status', table_found.get('status', 'available')),
+            'currentReservationId': data.get('currentReservationId', table_found.get('currentReservationId')),
+            'layoutPosition': data.get('layoutPosition', table_found.get('layoutPosition')),
+            'updatedAt': datetime.now().isoformat(),
+            'updatedBy': request.user.id
+        })
+        
+        # Ensure required fields are present
+        if 'id' not in table_found:
+            table_found['id'] = table_id
+        if 'brandId' not in table_found:
+            table_found['brandId'] = outlet_found.get('brandId', brand_found.get('id'))
+        if 'outletId' not in table_found:
+            table_found['outletId'] = outlet_found.get('id')
+        if 'createdAt' not in table_found:
+            table_found['createdAt'] = datetime.now().isoformat()
+        if 'createdBy' not in table_found:
+            table_found['createdBy'] = request.user.id
+        
+        # Get or initialize tables map
+        tables_map = outlet_found.get('tables', {})
+        if not isinstance(tables_map, dict):
+            tables_map = {}
+        
+        # Check if floor number is being changed (for updates)
+        new_floor_number = str(data.get('floorNumber', floor_number)) if not is_new_table else floor_number
+        
+        # If updating and floor number changed, remove from old floor
+        if not is_new_table and new_floor_number != floor_number:
+            # Remove table from old floor
+            if floor_number in tables_map and isinstance(tables_map[floor_number], list):
+                tables_map[floor_number] = [t for t in tables_map[floor_number] if not (isinstance(t, dict) and t.get('id') == table_id)]
+            floor_number = new_floor_number
+        
+        # Ensure the floor number exists in the tables map
+        if floor_number not in tables_map:
+            tables_map[floor_number] = []
+        
+        # Update or insert the table in the list
+        if is_new_table:
+            # Add new table to the list
+            tables_map[floor_number].append(table_found)
+        else:
+            # Update existing table
+            # First, try to find and update in the current floor
+            found = False
+            if isinstance(tables_map[floor_number], list):
+                for idx, table in enumerate(tables_map[floor_number]):
+                    if isinstance(table, dict) and table.get('id') == table_id:
+                        tables_map[floor_number][idx] = table_found
+                        found = True
+                        break
+            
+            # If not found in current floor, append it (shouldn't happen, but handle it)
+            if not found:
+                tables_map[floor_number].append(table_found)
+        
+        # Update the outlet's tables map
+        outlet_found['tables'] = tables_map
+        
+        # Update the outlets array in the brand
+        outlets = brand_found.get('outlets', [])
+        outlets[outlet_index] = outlet_found
+        
+        # Update the brand with the modified outlets array
+        update_data = {
+            'outlets': outlets,
+            'updatedAt': datetime.now().isoformat(),
+            'updatedBy': request.user.id
+        }
+        
+        brand_response = supabase.table('ecosuite_brands').update(update_data).eq('id', brand_found['id']).execute()
+        
+        if brand_response.data:
+            message = "Table created successfully" if is_new_table else "Table updated successfully"
+            status_code = status.HTTP_201_CREATED if is_new_table else status.HTTP_200_OK
+            return Response({
+                "message": message,
+                "table": table_found,
+                "outlet": outlet_found,
+                "brand": brand_response.data[0]
+            }, status=status_code)
+        else:
+            return Response({"error": "Failed to update brand"}, status=status.HTTP_400_BAD_REQUEST)
+            
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)

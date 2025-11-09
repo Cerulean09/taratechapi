@@ -21,4 +21,7 @@ urlpatterns = [
     path('upload-brand-logo/<str:brand_id>/', views.upload_brand_logo, name='upload_brand_logo'),
     path('upload-brand-floor-image/<str:brand_id>/', views.upload_brand_floor_image, name='upload_brand_floor_image'),
     path('upload-outlet-floor-image/<str:outlet_id>/', views.upload_outlet_floor_image, name='upload_outlet_floor_image'),
+    
+    # Table Management Endpoints
+    path('upsert-table/<str:table_id>/', views.upsert_table, name='upsert_table'),
 ]
