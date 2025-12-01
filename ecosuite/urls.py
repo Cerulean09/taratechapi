@@ -26,5 +26,18 @@ urlpatterns = [
     path('upsert-table/<str:table_id>/', views.upsert_table, name='upsert_table'),
     
     # Reservation Management Endpoints
+    path('get-reservations/', views.get_reservations, name='get_reservations'),
     path('upsert-reservation/<str:reservation_id>/', views.upsert_reservation, name='upsert_reservation'),
+    path('upsert-crm-customer/<str:customer_id>/', views.upsert_crm_customer, name='upsert_crm_customer'),
+    path('get-crm-customers/', views.get_crm_customers, name='get_crm_customers'),
+    path('check-reservation-availability/', views.check_reservation_availability, name='check_reservation_availability'),
+    path('request-reservation/', views.request_reservation, name='request_reservation'),
+    path('confirm-reservation/<str:reservation_id>/', views.confirm_reservation, name='confirm_reservation'),
+
+    # Pivot Integration
+    path('pivot/create-payment/', views.pivot_create_payment, name='pivot_create_payment'),
+    path('pivot/check-payment/<str:reservation_id>/', views.pivot_check_payment, name='pivot_check_payment'),
+    path('pivot/check-all-pending-payments/', views.pivot_check_all_pending_payments, name='pivot_check_all_pending_payments'),
+    # path('pivot/confirm-payment/', views.pivot_confirm_payment, name='pivot_confirm_payment'),
+    # path('pivot/payment-method-configs/', views.pivot_payment_method_configs, name='pivot_payment_method_configs'),
 ]

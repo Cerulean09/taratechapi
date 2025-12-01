@@ -20,9 +20,10 @@ from django.urls import path, include
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('nocanpayments.urls')),
-     path("api/tracker/", include("nocantracker.urls")),
-     path('api/notifications/', include('notifications.urls')),
-     path('api/chongqinghotpot/', include('chongqinghotpot.urls')),
-     path('api/ecosuite/', include('ecosuite.urls')),
+    path("api/tracker/", include("nocantracker.urls")),
+    path('api/notifications/', include('notifications.urls')),
+    path('api/chongqinghotpot/', include('chongqinghotpot.urls')),
+    path('api/ecosuite/', include('ecosuite.urls')),
+    path('api/koalaplus/', include('koalaplus.urls')),
      
 ]

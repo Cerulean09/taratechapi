@@ -1,13 +1,21 @@
 # nocantracker/services.py
+import os
 import requests
 import time
 import hashlib
 
 # === META PIXEL ===
-META_PIXEL_ID = "1054777313198157"
-META_ACCESS_TOKEN = "EAAUd5UHmwLcBPopDnEjgihWTs4P6Q18V6bQI3IjTCZClDTJl6aZCqoZBGOZBWPIsSbKHrKHkZBZBgZCCv1tEeEuufq5ah3KOXJZB6a9Jn0OWrsZCRLqiga8DQZBStC7ZBqGXcbOaaizPMlZCQLuoB6iDlLnRw82CptH2SsIzUgZCRCqCC3uuxNSPZAM0uJumAiZBUPfzFVSTwZDZD"  # generate in FB Business Manager
+META_PIXEL_ID = os.getenv("META_PIXEL_ID")
+META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
+
 
 def send_facebook_event(event_name, email=None):
+    if not META_PIXEL_ID or not META_ACCESS_TOKEN:
+        return {
+            "status_code": 500,
+            "error": "Missing META_PIXEL_ID or META_ACCESS_TOKEN environment variables.",
+        }
+
     url = f"https://graph.facebook.com/v19.0/{META_PIXEL_ID}/events"
     user_data = {}
     if email:
@@ -44,10 +52,17 @@ def send_facebook_event(event_name, email=None):
 
 
 # === GOOGLE ANALYTICS 4 ===
-GA_MEASUREMENT_ID = "G-XXXXXXXX"   # fill from docx / GA4 setup
-GA_API_SECRET = "<YOUR_API_SECRET>"
+GA_MEASUREMENT_ID = os.getenv("GA_MEASUREMENT_ID")
+GA_API_SECRET = os.getenv("GA_API_SECRET")
+
 
 def send_google_event(client_id, event_name, params=None):
+    if not GA_MEASUREMENT_ID or not GA_API_SECRET:
+        return {
+            "status_code": 500,
+            "error": "Missing GA_MEASUREMENT_ID or GA_API_SECRET environment variables.",
+        }
+
     url = f"https://www.google-analytics.com/mp/collect?measurement_id={GA_MEASUREMENT_ID}&api_secret={GA_API_SECRET}"
     payload = {
         "client_id": client_id,  # e.g., UUID per user/device

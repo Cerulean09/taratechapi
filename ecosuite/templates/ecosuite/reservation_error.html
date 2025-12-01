@@ -1,0 +1,16 @@
+{% extends "ecosuite/base.html" %}
+
+{% block title %}{{ error_title }}{% endblock %}
+
+{% block background %}linear-gradient(135deg, #f093fb 0%, #f5576c 100%){% endblock %}
+
+{% block content %}
+<div class="icon">⚠️</div>
+<h1>{{ error_title }}</h1>
+<p class="message">{{ error_message }}</p>
+{% endblock %}
+
+
+
+
+

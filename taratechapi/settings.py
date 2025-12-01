@@ -13,10 +13,14 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 from pathlib import Path
 import os
 from datetime import timedelta
+import environ
 
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+env = environ.Env()
+environ.Env.read_env(BASE_DIR / '.env')
 
 
 # Quick-start development settings - unsuitable for production
@@ -30,6 +34,7 @@ DEBUG = True
 
 ALLOWED_HOSTS = [
     'taratechid.pythonanywhere.com',
+    'taratechapi.fly.dev',
 
 ]
 
@@ -51,6 +56,7 @@ INSTALLED_APPS = [
     'notifications',
     'chongqinghotpot',
     'ecosuite',
+    'koalaplus',
 ]
 
 MIDDLEWARE = [
@@ -106,6 +112,19 @@ DATABASES = {
     }
 }
 
+# Cache configuration
+# Using locmem cache (in-memory) - works without database connection
+# Note: Tokens will be lost on server restart. For persistence, use database cache:
+# 'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+# 'LOCATION': 'django_cache_table',
+# Then run: python manage.py createcachetable
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'crm-oauth-tokens',
+    }
+}
+
 
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
@@ -150,13 +169,13 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Zoho Mail settings
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST = os.getenv("EMAIL_HOST")
-EMAIL_PORT = os.getenv("EMAIL_PORT")
-EMAIL_USE_SSL = bool(os.getenv("EMAIL_USE_SSL"))
-EMAIL_USE_TLS = bool(os.getenv("EMAIL_USE_TLS"))
-EMAIL_HOST_USER = os.getenv("ZOHO_EMAIL_USER")
-EMAIL_HOST_PASSWORD = os.getenv("ZOHO_EMAIL_PASS")
-DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL")
+EMAIL_HOST = env("EMAIL_HOST", default=None)
+EMAIL_PORT = env.int("EMAIL_PORT", default=587)
+EMAIL_USE_SSL = env.bool("EMAIL_USE_SSL", default=False)
+EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=False)
+EMAIL_HOST_USER = env("ZOHO_EMAIL_USER", default=None)
+EMAIL_HOST_PASSWORD = env("ZOHO_EMAIL_PASS", default=None)
+DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default=None)
 
 AUTH_USER_MODEL = "ecosuite.EcosuiteUser"
 
