@@ -298,7 +298,7 @@ def get_all_brands(request):
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def get_brand(request, brand_id):
     """Get a single brand by ID"""
     supabase = create_supabase_client()
@@ -924,7 +924,7 @@ def upsert_table(request, table_id):
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(['POST', 'PUT', 'PATCH'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def upsert_reservation(request, reservation_id):
     """Insert or update a reservation. If reservation exists, updates it; otherwise creates a new one."""
     supabase = create_supabase_client()
@@ -1190,6 +1190,285 @@ def get_reservations(request):
         return Response({
             "reservations": reservations,
             "count": len(reservations)
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_reservations_for_brand_with_reservation_id(request, brand_id, reservation_id):
+    """Get reservations filtered by brandId and reservation id. Returns full JSON or empty list."""
+    supabase = create_supabase_client()
+    try:
+        # Build query with filters for brandId and reservation id
+        query = supabase.table('ecosuite_reservations').select('*')
+        query = query.eq('brandId', brand_id)
+        query = query.eq('id', reservation_id)
+        
+        # Execute query
+        response = query.execute()
+        reservations = response.data or []
+        
+        # Return the full JSON (list of reservations)
+        return Response(reservations, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_reservations_for_brand_with_phone_number(request, brand_id, phone_number):
+    """Get reservations filtered by brandId and reservation id. Returns full JSON or empty list."""
+    supabase = create_supabase_client()
+    try:
+        # Build query with filters for brandId and reservation id
+        query = supabase.table('ecosuite_reservations').select('*')
+        query = query.eq('brandId', brand_id)
+        query = query.eq('customerPhone', phone_number)
+        query = query.order('reservationDateTime', desc=True)
+        
+        # Execute query
+        response = query.execute()
+        reservations = response.data or []
+        
+        # Return the full JSON (list of reservations)
+        return Response(reservations, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+def _format_full_date(reservation_datetime):
+    """Format reservation datetime to full date format (e.g., 'Monday, January 15, 2024')."""
+    try:
+        if 'Z' in reservation_datetime:
+            dt = datetime.fromisoformat(reservation_datetime.replace('Z', '+00:00'))
+        elif '+' in reservation_datetime or reservation_datetime.count('-') > 2:
+            dt = datetime.fromisoformat(reservation_datetime)
+        else:
+            dt = datetime.fromisoformat(reservation_datetime)
+        return dt.strftime('%A, %B %d, %Y')
+    except:
+        return reservation_datetime
+
+def _format_time_for_koala(reservation_datetime):
+    """Format reservation datetime to time format for Koala (e.g., '7:00 PM')."""
+    try:
+        if 'Z' in reservation_datetime:
+            dt = datetime.fromisoformat(reservation_datetime.replace('Z', '+00:00'))
+        elif '+' in reservation_datetime or reservation_datetime.count('-') > 2:
+            dt = datetime.fromisoformat(reservation_datetime)
+        else:
+            dt = datetime.fromisoformat(reservation_datetime)
+        return dt.strftime('%I:%M %p').lstrip('0')
+    except:
+        return reservation_datetime
+
+def _parse_phone_to_international(phone_number):
+    """Parse phone number to international format. Handles Indonesian numbers starting with +62."""
+    if not phone_number:
+        return None
+    
+    phone_number = str(phone_number).strip()
+    
+    # If already in international format with +
+    if phone_number.startswith('+'):
+        return phone_number
+    
+    # If starts with +62 (Indonesian country code)
+    if phone_number.startswith('+62'):
+        return phone_number
+    
+    # If starts with 62 (without +)
+    if phone_number.startswith('62'):
+        return '+' + phone_number
+    
+    # If starts with 0 (Indonesian local format), convert to +62
+    if phone_number.startswith('0'):
+        return '+62' + phone_number[1:]
+    
+    # Default: assume Indonesian number and add +62
+    return '+62' + phone_number
+
+def _login_to_koala():
+    """Login to Koala Plus and return access token."""
+    try:
+        trial_email = 'robin.dartanto@taratech.id'
+        trial_password = 'TaraTech123'
+        
+        url = "https://api.koalaapp.id/v1/identity/auth/koala-plus/login"
+        payload = json.dumps({
+            "email": trial_email,
+            "password": trial_password
+        })
+        headers = {
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.post(url, headers=headers, data=payload)
+        response.raise_for_status()
+        login_data = response.json()
+        
+        # Extract access token from response
+        access_token = None
+        if login_data.get('data') and login_data['data'].get('koalaToken'):
+            access_token = login_data['data']['koalaToken'].get('accessToken')
+        
+        return access_token
+    except Exception as e:
+        print(f"Error logging in to Koala: {e}")
+        return None
+
+def _build_notification_data(reservations):
+    """Build notification data array from a list of reservations."""
+    notification_data = []
+    
+    for reservation in reservations:
+        # Parse phone number
+        customer_phone = reservation.get('customerPhone')
+        if not customer_phone:
+            continue
+        
+        phone_number_international = _parse_phone_to_international(customer_phone)
+        if not phone_number_international:
+            continue
+        
+        # Format date and time
+        reservation_date_time = reservation.get('reservationDateTime')
+        if not reservation_date_time:
+            continue
+        
+        formatted_date = _format_full_date(reservation_date_time)
+        formatted_time = _format_time_for_koala(reservation_date_time)
+        pax = reservation.get('numberOfGuests', 0)
+        reservation_id = reservation.get('id')
+        
+        # Prepare confirmation URL
+        confirmation_url = f'https://taratechapi.fly.dev/api/ecosuite/confirm-reservation/{reservation_id}/'
+        
+        # Append notification data item
+        notification_data.append({
+            "phoneNumber": phone_number_international,
+            "paramData": [
+                f"*{pax}*",
+                f"*{formatted_date}*",
+                f"*{formatted_time}*",
+                confirmation_url,
+            ],
+        })
+    
+    return notification_data
+
+def _send_reconfirmation_broadcast(token, reservations):
+    """Send reconfirmation messages via Koala broadcast API for all reservations in a single request."""
+    try:
+        if not reservations:
+            return {"success": False, "error": "No reservations provided"}
+        
+        # Build notification data for all reservations
+        notification_data = _build_notification_data(reservations)
+        
+        if not notification_data:
+            return {"success": False, "error": "No valid notification data could be built from reservations"}
+        
+        # Prepare broadcast payload
+        broadcast_url = 'https://taratechapi.fly.dev/api/koalaplus/broadcast-reservation-success/'
+        broadcast_payload = {
+            'token': token,
+            'campaignName': '017',
+            'templateId': '017',
+            'notificationData': notification_data,
+        }
+        
+        # Send broadcast request
+        broadcast_response = requests.post(
+            broadcast_url,
+            headers={'Content-Type': 'application/json'},
+            json=broadcast_payload
+        )
+        
+        if broadcast_response.status_code in [200, 201]:
+            return {
+                "success": True,
+                "message": f"Reconfirmation messages sent successfully for {len(notification_data)} reservation(s)",
+                "notifications_sent": len(notification_data)
+            }
+        else:
+            return {
+                "success": False,
+                "error": f"Failed to send broadcast: {broadcast_response.status_code}",
+                "response": broadcast_response.text
+            }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def check_for_reservations_2_days_before_reservation_date(request):
+    """Get all pending reservations that are scheduled 2 days from today. Compares only the date part, not the time.
+    If reservations are found, automatically sends reconfirmation messages via Koala WhatsApp."""
+    supabase = create_supabase_client()
+    try:
+        # Get today's date and calculate target date (2 days from now)
+        today = datetime.now().date()
+        target_date = today + timedelta(days=2)
+        
+        # Get all reservations from the database
+        response = supabase.table('ecosuite_reservations').select('*').execute()
+        all_reservations = response.data or []
+        
+        # Filter reservations where the date part matches the target date and status is pending
+        matching_reservations = []
+        for reservation in all_reservations:
+            # Only process pending reservations
+            reservation_status = reservation.get('status')
+            if reservation_status != 'pending':
+                continue
+            
+            reservation_date_time = reservation.get('reservationDateTime')
+            if not reservation_date_time:
+                continue
+            
+            try:
+                # Parse the reservation datetime
+                # Handle various ISO format variations
+                reservation_dt = None
+                if 'Z' in reservation_date_time:
+                    reservation_dt = datetime.fromisoformat(reservation_date_time.replace('Z', '+00:00'))
+                elif '+' in reservation_date_time or reservation_date_time.count('-') > 2:
+                    reservation_dt = datetime.fromisoformat(reservation_date_time)
+                else:
+                    reservation_dt = datetime.fromisoformat(reservation_date_time)
+                
+                # Extract only the date part
+                reservation_date = reservation_dt.date()
+                
+                # Check if the reservation date matches the target date (2 days from today)
+                if reservation_date == target_date:
+                    matching_reservations.append(reservation)
+            except Exception as parse_error:
+                # Skip reservations with invalid datetime format
+                continue
+        
+        # If list is not empty, send reconfirmation messages
+        broadcast_result = None
+        if matching_reservations:
+            # Login to Koala to get token
+            token = _login_to_koala()
+            if not token:
+                return Response({
+                    "reservations": matching_reservations,
+                    "count": len(matching_reservations),
+                    "message": "Reservations found but failed to authenticate with Koala. Messages not sent.",
+                    "broadcast_result": None
+                }, status=status.HTTP_200_OK)
+            
+            # Send reconfirmation messages for all reservations in a single broadcast
+            broadcast_result = _send_reconfirmation_broadcast(token, matching_reservations)
+        
+        # Return the JSON of all matching reservations along with broadcast result
+        return Response({
+            "reservations": matching_reservations,
+            "count": len(matching_reservations),
+            "broadcast_result": broadcast_result,
+            "messages_sent": len(matching_reservations) > 0 and broadcast_result and broadcast_result.get("success", False)
         }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -1479,7 +1758,7 @@ def authenticate_pivot_request(environment='staging'):
     return access_token, base_url
 
 @api_view(['POST'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def pivot_create_payment(request):
     """Create a payment in Pivot from EcoSuiteReservation data."""
     try:
@@ -1578,7 +1857,7 @@ def pivot_create_payment(request):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def pivot_check_payment(request, reservation_id):
     """Check payment status for a specific reservation from Pivot API."""
     try:
@@ -1967,11 +2246,15 @@ def check_reservation_availability(request):
     Check reservation availability without creating a reservation.
     Returns conflict information to help user decide whether to join waitlist or pick another time.
     
+    Checks:
+    1. Time conflicts (existing reservations within +/- 2 hours)
+    2. Capacity limits (max 18 pax across 9 tables)
+    
     Query parameters:
     - brandId: Brand ID (required)
     - outletId: Outlet ID (required)
     - dateTime: Reservation date and time in ISO format (required)
-    - guests: Number of guests (optional, for future capacity checks)
+    - guests: Number of guests (required for capacity checks)
     """
     supabase = create_supabase_client()
     try:
@@ -2000,6 +2283,21 @@ def check_reservation_availability(request):
                 "parameter": "dateTime"
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        # Validate guests parameter
+        if not number_of_guests:
+            return Response({
+                "error": "Number of guests is required",
+                "parameter": "guests"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            number_of_guests = int(number_of_guests)
+        except (ValueError, TypeError):
+            return Response({
+                "error": "Number of guests must be a valid number",
+                "parameter": "guests"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
         # Normalize the dateTime format
         if reservation_date_time:
             # Replace space before timezone offset with +
@@ -2014,33 +2312,108 @@ def check_reservation_availability(request):
                     "received_value": reservation_date_time
                 }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Check for conflicting reservations
-        has_conflicts = check_reservation_conflicts(supabase, brand_id, outlet_id, reservation_date_time)
+        # Check for conflicting reservations and calculate capacity
+        has_time_conflicts = check_reservation_conflicts(supabase, brand_id, outlet_id, reservation_date_time)
         
-        # Get conflicting reservations details for response
+        # Get existing reservations within +/- 2 hours for capacity check
         conflicting_reservations = []
-        if has_conflicts:
-            try:
-                dt = datetime.fromisoformat(reservation_date_time.replace('Z', '+00:00'))
-                time_before = dt - timedelta(hours=2)
-                time_after = dt + timedelta(hours=2)
+        total_existing_pax = 0
+        total_existing_reservations = 0
+        total_tables_used = 0
+        max_capacity = 18
+        max_tables = 9
+        pax_per_table = 2
+        has_capacity_conflict = False
+        
+        try:
+            dt = datetime.fromisoformat(reservation_date_time.replace('Z', '+00:00'))
+            time_before = dt - timedelta(hours=2)
+            time_after = dt + timedelta(hours=2)
 
-                testRepsonse = supabase.table('ecosuite_reservations').select('*').eq('brandId', brand_id).eq('outletId', outlet_id).gte('reservationDateTime', time_before.isoformat()).lte('reservationDateTime', time_after.isoformat()).execute()
-                
-                response = supabase.table('ecosuite_reservations').select('*').eq('brandId', brand_id).eq('outletId', outlet_id).in_('status', ['pending', 'waitlisted','confirmed']).gte('reservationDateTime', time_before.isoformat()).lte('reservationDateTime', time_after.isoformat()).execute()
-                
-                if response.data:
-                    conflicting_reservations = response.data
-            except Exception as e:
-                print(f"Error fetching conflict details: {e}")
+            # Fetch existing reservations in the time window
+            response = supabase.table('ecosuite_reservations').select('*').eq('brandId', brand_id).eq('outletId', outlet_id).in_('status', ['pending', 'waitlisted', 'confirmed', 'verified']).gte('reservationDateTime', time_before.isoformat()).lte('reservationDateTime', time_after.isoformat()).execute()
+            
+            if response.data:
+                conflicting_reservations = response.data
+                total_existing_reservations = len(conflicting_reservations)
+                # Calculate total pax and tables used from existing reservations
+                for reservation in conflicting_reservations:
+                    guests = reservation.get('numberOfGuests', 0)
+                    try:
+                        guests_int = int(guests) if guests else 0
+                        total_existing_pax += guests_int
+                        # Calculate tables needed for this reservation
+                        # Each table seats max 2 pax, so: ceil(guests / 2)
+                        import math
+                        tables_needed = math.ceil(guests_int / pax_per_table) if guests_int > 0 else 0
+                        total_tables_used += tables_needed
+                    except (ValueError, TypeError):
+                        pass
+        except Exception as e:
+            print(f"Error fetching conflict details: {e}")
+        
+        # Calculate tables needed for the new reservation
+        import math
+        new_reservation_tables = math.ceil(number_of_guests / pax_per_table)
+        
+        # Check if adding new reservation would exceed capacity
+        total_pax_with_new = total_existing_pax + number_of_guests
+        total_tables_with_new = total_tables_used + new_reservation_tables
+        
+        # Capacity conflict if:
+        # 1. All tables are occupied (total tables used would be 9 or more)
+        # 2. Current total pax is already at or above 18
+        # 3. Adding new reservation would exceed 18 pax
+        if total_tables_with_new > max_tables:
+            # Not enough tables available
+            has_capacity_conflict = True
+        elif total_existing_pax >= max_capacity or total_pax_with_new > max_capacity:
+            # Exceeds pax capacity
+            has_capacity_conflict = True
+        
+        # Overall conflict is either time conflict OR capacity conflict
+        has_conflicts = has_time_conflicts or has_capacity_conflict
+        
+        # Determine conflict reason
+        conflict_reason = []
+        if has_time_conflicts:
+            conflict_reason.append("time_conflicts")
+        if has_capacity_conflict:
+            conflict_reason.append("capacity_exceeded")
+        
+        # Build message
+        if not has_conflicts:
+            message = "Reservations available for this time slot"
+        elif has_capacity_conflict:
+            if total_tables_with_new > max_tables:
+                message = f"Not enough tables available. Current: {total_tables_used}/{max_tables} tables used ({total_existing_pax} pax). Your request needs {new_reservation_tables} table(s) for {number_of_guests} pax. Total would be {total_tables_with_new} tables. You can join the waitlist."
+            elif total_existing_pax >= max_capacity or total_pax_with_new > max_capacity:
+                message = f"Capacity limit reached. Current: {total_existing_pax} pax, max: {max_capacity} pax. Your request for {number_of_guests} pax would exceed the limit. You can join the waitlist."
+            else:
+                message = f"Capacity issue detected. You can join the waitlist."
+        else:
+            message = "There are existing reservations within 2 hours of your requested time. You can join the waitlist or choose another time."
         
         return Response({
             "available": not has_conflicts,
             "hasConflicts": has_conflicts,
+            "hasTimeConflicts": has_time_conflicts,
+            "hasCapacityConflict": has_capacity_conflict,
+            "conflictReason": conflict_reason,
             "requestedDateTime": reservation_date_time,
+            "requestedGuests": number_of_guests,
+            "newReservationTables": new_reservation_tables,
+            "totalExistingPax": total_existing_pax,
+            "totalExistingReservations": total_existing_reservations,
+            "totalTablesUsed": total_tables_used,
+            "totalPaxWithNew": total_pax_with_new,
+            "totalTablesWithNew": total_tables_with_new,
+            "maxCapacity": max_capacity,
+            "maxTables": max_tables,
+            "paxPerTable": pax_per_table,
             "recommendedStatus": "waitlisted" if has_conflicts else "pending",
             "conflictingReservations": len(conflicting_reservations),
-            "message": "Reservations available for this time slot" if not has_conflicts else "There are existing reservations within 2 hours of your requested time. You can join the waitlist or choose another time.",
+            "message": message,
             "suggestedAction": None if not has_conflicts else "join_waitlist_or_choose_another_time"
         }, status=status.HTTP_200_OK)
         
@@ -2335,7 +2708,70 @@ def confirm_reservation(request, reservation_id):
                     'error_message': "The action must be either 'confirm' or 'cancel'."
                 })
         
-        # No action provided, show the confirmation UI
+        # No action provided, mark reservation as verified, then show the confirmation UI
+        try:
+            verify_update = {
+                'status': 'verified',
+                'updatedAt': datetime.now().isoformat()
+            }
+            verify_response = supabase.table('ecosuite_reservations').update(verify_update).eq('id', reservation_id).execute()
+
+            if verify_response.data and len(verify_response.data) > 0:
+                # Use the updated reservation data if available
+                reservation = verify_response.data[0]
+                formatted_datetime = format_reservation_datetime(reservation.get('reservationDateTime', 'N/A'))
+
+            # After successful verification, trigger Koala broadcast if templateId is provided
+                try:
+
+                    trial_login_url = 'https://taratechapi.fly.dev/api/koalaplus/trial-login/'
+                    trial_resp = requests.get(trial_login_url, timeout=5)
+                    trial_data = trial_resp.json() if trial_resp.ok else {}
+                    koala_token = (
+                        trial_data.get('data', {})
+                        .get('koalaToken', {})
+                        .get('accessToken')
+                    )
+
+                    if koala_token:
+                        # Prepare notification payload for Koala
+                        customer_phone = reservation.get('customerPhone')
+                        customer_name = reservation.get('customerName') or reservation.get('customer_name')
+                        param_data = [
+                            # customer_name or '',
+                            # formatted_datetime
+                        ]
+
+                        koala_payload = {
+                            'token': koala_token,
+                            'campaignName': '007',
+                            'templateId': '007',
+                            'notificationData': [
+                                {
+                                    'phoneNumber': customer_phone,
+                                    'paramData': param_data,
+                                }
+                            ],
+                        }
+
+                        # Fire-and-forget call to internal Koala broadcast endpoint
+                        koala_broadcast_url = 'https://taratechapi.fly.dev/api/koalaplus/broadcast-reservation-success/'
+                        try:
+                            requests.post(
+                                koala_broadcast_url,
+                                json=koala_payload,
+                                timeout=5,
+                            )
+                        except Exception:
+                            # Do not block or error the confirmation flow if broadcast fails
+                            pass
+                except Exception:
+                    # Swallow any Koala integration errors to keep confirmation flow robust
+                    pass
+        except Exception:
+            # If verification update fails, continue to show the UI with original data
+            pass
+
         return render(request, 'ecosuite/confirm_reservation.html', {
             'reservation': reservation,
             'formatted_datetime': formatted_datetime

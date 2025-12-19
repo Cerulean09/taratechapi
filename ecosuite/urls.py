@@ -27,12 +27,16 @@ urlpatterns = [
     
     # Reservation Management Endpoints
     path('get-reservations/', views.get_reservations, name='get_reservations'),
+    path('get-reservations-for-brand-with-reservation-id/<str:brand_id>/<str:reservation_id>/', views.get_reservations_for_brand_with_reservation_id, name='get_reservations_for_brand_with_reservation_id'),
+
+    path('get-reservations-for-brand-with-phone-number/<str:brand_id>/<str:phone_number>/', views.get_reservations_for_brand_with_phone_number, name='get_reservations_for_brand_with_phone_number'),
     path('upsert-reservation/<str:reservation_id>/', views.upsert_reservation, name='upsert_reservation'),
     path('upsert-crm-customer/<str:customer_id>/', views.upsert_crm_customer, name='upsert_crm_customer'),
     path('get-crm-customers/', views.get_crm_customers, name='get_crm_customers'),
     path('check-reservation-availability/', views.check_reservation_availability, name='check_reservation_availability'),
     path('request-reservation/', views.request_reservation, name='request_reservation'),
     path('confirm-reservation/<str:reservation_id>/', views.confirm_reservation, name='confirm_reservation'),
+    path('check-for-reservations-2-days-before-reservation-date/', views.check_for_reservations_2_days_before_reservation_date, name='check_for_reservations_2_days_before_reservation_date'),
 
     # Pivot Integration
     path('pivot/create-payment/', views.pivot_create_payment, name='pivot_create_payment'),
