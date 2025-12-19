@@ -13,6 +13,7 @@ import uuid
 import json
 import re
 from datetime import datetime, timedelta
+from django.utils import timezone
 import requests
 
 def resolve_request_environment(request):
@@ -58,7 +59,7 @@ def sync_crm_customer_from_reservation(supabase, reservation_record, request_use
     if not brand_id or not outlet_id:
         return
 
-    now = datetime.now().isoformat()
+    now = timezone.now().isoformat()
 
     existing_response = supabase.table('ecosuite_crm_customers').select('*').eq('phone', customer_phone).execute()
     existing_customers = existing_response.data or []
@@ -257,7 +258,7 @@ def update_user(request, user_id):
         
         # Update timestamp if field exists
         if 'updatedAt' in data or 'dateJoined' in data:
-            data['updatedAt'] = datetime.now().isoformat()
+            data['updatedAt'] = timezone.now().isoformat()
         
         # Update user
         response = supabase.table('ecosuite_users').update(data).eq('id', user_id).execute()
@@ -327,7 +328,7 @@ def create_brand(request):
             return Response({"error": "Brand name is required"}, status=status.HTTP_400_BAD_REQUEST)
         
         # Set timestamps if not provided
-        now = datetime.now().isoformat()
+        now = timezone.now().isoformat()
         if 'createdAt' not in data:
             data['createdAt'] = now
         if 'updatedAt' not in data:
@@ -372,7 +373,7 @@ def update_brand(request, brand_id):
         data = request.data.copy()
         
         # Update timestamp
-        data['updatedAt'] = datetime.now().isoformat()
+        data['updatedAt'] = timezone.now().isoformat()
         
         # Set updatedBy from authenticated user if not provided
         if 'updatedBy' not in data:
@@ -400,7 +401,7 @@ def suspend_brand(request, brand_id):
     try:
         data = {
             'status': 'suspended',
-            'updatedAt': datetime.now().isoformat(),
+            'updatedAt': timezone.now().isoformat(),
             'updatedBy': request.user.id
         }
         
@@ -430,7 +431,7 @@ def upsert_brand(request):
             return Response({"error": "Brand name is required"}, status=status.HTTP_400_BAD_REQUEST)
         
         brand_id = data.get('id')
-        now = datetime.now().isoformat()
+        now = timezone.now().isoformat()
         
         if brand_id:
             # Update existing brand
@@ -542,7 +543,7 @@ def upload_brand_logo(request, brand_id):
         # Update brand with logo URL
         update_data = {
             'logoUrl': logo_url,
-            'updatedAt': datetime.now().isoformat(),
+            'updatedAt': timezone.now().isoformat(),
             'updatedBy': request.user.id
         }
         
@@ -605,7 +606,7 @@ def upload_brand_floor_image(request, brand_id):
         # Update brand with floor image URL
         update_data = {
             'floorImageUrl': floor_image_url,
-            'updatedAt': datetime.now().isoformat(),
+            'updatedAt': timezone.now().isoformat(),
             'updatedBy': request.user.id
         }
         
@@ -717,7 +718,7 @@ def upload_outlet_floor_image(request, outlet_id):
         # Update the brand with the modified outlets array
         update_data = {
             'outlets': outlets,
-            'updatedAt': datetime.now().isoformat(),
+            'updatedAt': timezone.now().isoformat(),
             'updatedBy': request.user.id
         }
         
@@ -815,7 +816,7 @@ def upsert_table(request, table_id):
                 return Response({"error": "Outlet not found"}, status=status.HTTP_404_NOT_FOUND)
             
             # Create new table
-            now = datetime.now().isoformat()
+            now = timezone.now().isoformat()
             table_found = {
                 'id': table_id,
                 'brandId': outlet_found.get('brandId', brand_found.get('id')),
@@ -838,7 +839,7 @@ def upsert_table(request, table_id):
             'status': data.get('status', table_found.get('status', 'available')),
             'currentReservationId': data.get('currentReservationId', table_found.get('currentReservationId')),
             'layoutPosition': data.get('layoutPosition', table_found.get('layoutPosition')),
-            'updatedAt': datetime.now().isoformat(),
+            'updatedAt': timezone.now().isoformat(),
             'updatedBy': request.user.id
         })
         
@@ -850,7 +851,7 @@ def upsert_table(request, table_id):
         if 'outletId' not in table_found:
             table_found['outletId'] = outlet_found.get('id')
         if 'createdAt' not in table_found:
-            table_found['createdAt'] = datetime.now().isoformat()
+            table_found['createdAt'] = timezone.now().isoformat()
         if 'createdBy' not in table_found:
             table_found['createdBy'] = request.user.id
         
@@ -902,7 +903,7 @@ def upsert_table(request, table_id):
         # Update the brand with the modified outlets array
         update_data = {
             'outlets': outlets,
-            'updatedAt': datetime.now().isoformat(),
+            'updatedAt': timezone.now().isoformat(),
             'updatedBy': request.user.id
         }
         
@@ -935,7 +936,7 @@ def upsert_reservation(request, reservation_id):
         existing_response = supabase.table('ecosuite_reservations').select('*').eq('id', reservation_id).execute()
         is_new_reservation = not existing_response.data or len(existing_response.data) == 0
         
-        now = datetime.now().isoformat()
+        now = timezone.now().isoformat()
         
         if is_new_reservation:
             # Create new reservation
@@ -1073,7 +1074,7 @@ def upsert_crm_customer(request, customer_id):
         elif not isinstance(receipt_ids, list):
             receipt_ids = [receipt_ids]
 
-        now = datetime.now().isoformat()
+        now = timezone.now().isoformat()
 
         existing_response = supabase.table('ecosuite_crm_customers').select('*').eq('id', customer_id).execute()
         is_new_customer = not existing_response.data or len(existing_response.data) == 0
@@ -1407,7 +1408,7 @@ def check_for_reservations_2_days_before_reservation_date(request):
     supabase = create_supabase_client()
     try:
         # Get today's date and calculate target date (2 days from now)
-        today = datetime.now().date()
+        today = timezone.localdate()
         target_date = today + timedelta(days=2)
         
         # Get all reservations from the database
@@ -1928,7 +1929,7 @@ def pivot_check_payment(request, reservation_id):
                 pivot_status = pivot_payment.get('status', '').upper()
                 if pivot_status == 'SUCCESS':
                     new_status = 'paid'
-                    paid_at = pivot_payment.get('paidAt') or pivot_payment.get('settledAt') or datetime.now().isoformat()
+                    paid_at = pivot_payment.get('paidAt') or pivot_payment.get('settledAt') or timezone.now().isoformat()
                     payment['paidAt'] = paid_at
                 elif pivot_status == 'EXPIRED':
                     new_status = 'expired'
@@ -1942,7 +1943,7 @@ def pivot_check_payment(request, reservation_id):
                 
                 # Update payment status
                 payment['status'] = new_status
-                payment['updatedAt'] = datetime.now().isoformat()
+                payment['updatedAt'] = timezone.now().isoformat()
                 
                 # Update in payment map
                 payment_map[payment_id] = payment
@@ -1957,7 +1958,7 @@ def pivot_check_payment(request, reservation_id):
                 # If payment not found in Pivot, mark as expired or keep current status
                 if pivot_response.status_code == 404:
                     payment['status'] = 'expired'
-                    payment['updatedAt'] = datetime.now().isoformat()
+                    payment['updatedAt'] = timezone.now().isoformat()
                     payment_map[payment_id] = payment
                     payment_statuses.append({
                         'paymentId': payment_id,
@@ -1976,7 +1977,7 @@ def pivot_check_payment(request, reservation_id):
         
         # Update reservation with updated payments
         reservation['payments'] = updated_payments
-        reservation['updatedAt'] = datetime.now().isoformat()
+        reservation['updatedAt'] = timezone.now().isoformat()
         reservation['updatedBy'] = request.user.id
         
         update_response = supabase.table('ecosuite_reservations').update({
@@ -2072,7 +2073,7 @@ def pivot_check_all_pending_payments(request):
                         pivot_status = pivot_payment.get('status', '').upper()
                         if pivot_status == 'SUCCESS':
                             new_status = 'paid'
-                            paid_at = pivot_payment.get('paidAt') or pivot_payment.get('settledAt') or datetime.now().isoformat()
+                            paid_at = pivot_payment.get('paidAt') or pivot_payment.get('settledAt') or timezone.now().isoformat()
                             payment['paidAt'] = paid_at
                         elif pivot_status == 'EXPIRED':
                             new_status = 'expired'
@@ -2086,7 +2087,7 @@ def pivot_check_all_pending_payments(request):
                         
                         # Update payment
                         payment['status'] = new_status
-                        payment['updatedAt'] = datetime.now().isoformat()
+                        payment['updatedAt'] = timezone.now().isoformat()
                         
                         # Update in payment map
                         payment_map[payment_id] = payment
@@ -2101,7 +2102,7 @@ def pivot_check_all_pending_payments(request):
                     elif pivot_response.status_code == 404:
                         # Payment not found in Pivot, mark as expired
                         payment['status'] = 'expired'
-                        payment['updatedAt'] = datetime.now().isoformat()
+                        payment['updatedAt'] = timezone.now().isoformat()
                         payment_map[payment_id] = payment
                         results.append({
                             'reservationId': reservation.get('id'),
@@ -2144,7 +2145,7 @@ def pivot_check_all_pending_payments(request):
             # Update reservation with updated payments (and status when needed)
             try:
                 reservation['payments'] = updated_payments
-                reservation['updatedAt'] = datetime.now().isoformat()
+                reservation['updatedAt'] = timezone.now().isoformat()
                 reservation['updatedBy'] = request.user.id
                 update_payload = {
                     'payments': updated_payments,
@@ -2532,7 +2533,7 @@ def request_reservation(request):
         
         # Generate reservation ID
         reservation_id = str(uuid.uuid4())
-        now = datetime.now().isoformat()
+        now = timezone.now().isoformat()
         
         # Check for conflicting reservations
         has_conflicts = check_reservation_conflicts(supabase, brand_id, outlet_id, reservation_date_time)
@@ -2663,7 +2664,7 @@ def confirm_reservation(request, reservation_id):
                 # Update reservation status to confirmed
                 update_data = {
                     'status': 'confirmed',
-                    'updatedAt': datetime.now().isoformat()
+                    'updatedAt': timezone.now().isoformat()
                 }
                 update_response = supabase.table('ecosuite_reservations').update(update_data).eq('id', reservation_id).execute()
                 
@@ -2685,7 +2686,7 @@ def confirm_reservation(request, reservation_id):
                 # Update reservation status to cancelled
                 update_data = {
                     'status': 'cancelled',
-                    'updatedAt': datetime.now().isoformat()
+                    'updatedAt': timezone.now().isoformat()
                 }
                 update_response = supabase.table('ecosuite_reservations').update(update_data).eq('id', reservation_id).execute()
                 
@@ -2712,7 +2713,7 @@ def confirm_reservation(request, reservation_id):
         try:
             verify_update = {
                 'status': 'verified',
-                'updatedAt': datetime.now().isoformat()
+                'updatedAt': timezone.now().isoformat()
             }
             verify_response = supabase.table('ecosuite_reservations').update(verify_update).eq('id', reservation_id).execute()
 
