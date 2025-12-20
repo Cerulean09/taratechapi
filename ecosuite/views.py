@@ -1357,6 +1357,47 @@ def _build_notification_data(reservations):
     
     return notification_data
 
+def _build_reminder_notification_data(reservations):
+    """Build notification data array from a list of reservations for reminder messages.
+    This function has different parameters than the reconfirmation notification data."""
+    notification_data = []
+    
+    for reservation in reservations:
+        # Parse phone number
+        customer_phone = reservation.get('customerPhone')
+        if not customer_phone:
+            continue
+        
+        phone_number_international = _parse_phone_to_international(customer_phone)
+        if not phone_number_international:
+            continue
+        
+        # Format date and time
+        reservation_date_time = reservation.get('reservationDateTime')
+        if not reservation_date_time:
+            continue
+        
+        formatted_date = _format_full_date(reservation_date_time)
+        formatted_time = _format_time_for_koala(reservation_date_time)
+        pax = reservation.get('numberOfGuests', 0)
+        reservation_id = reservation.get('id')
+        
+        # Prepare confirmation URL
+        confirmation_url = f'https://taratechapi.fly.dev/api/ecosuite/confirm-reservation/{reservation_id}/'
+        
+        # Append notification data item with different parameters for reminder template
+        notification_data.append({
+            "phoneNumber": phone_number_international,
+            "paramData": [
+                f"*{pax}*",
+                f"*{formatted_date}*",
+                f"*{formatted_time}*",
+                # confirmation_url,
+            ],
+        })
+    
+    return notification_data
+
 def _send_reconfirmation_broadcast(token, reservations):
     """Send reconfirmation messages via Koala broadcast API for all reservations in a single request."""
     try:
@@ -1403,7 +1444,7 @@ def _send_reconfirmation_broadcast(token, reservations):
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def check_for_reservations_2_days_before_reservation_date(request):
-    """Get all pending reservations that are scheduled 2 days from today. Compares only the date part, not the time.
+    """Get all confirmed reservations that are scheduled 2 days from today. Compares only the date part, not the time.
     If reservations are found, automatically sends reconfirmation messages via Koala WhatsApp."""
     supabase = create_supabase_client()
     try:
@@ -1415,12 +1456,12 @@ def check_for_reservations_2_days_before_reservation_date(request):
         response = supabase.table('ecosuite_reservations').select('*').execute()
         all_reservations = response.data or []
         
-        # Filter reservations where the date part matches the target date and status is pending
+        # Filter reservations where the date part matches the target date and status is confirmed
         matching_reservations = []
         for reservation in all_reservations:
-            # Only process pending reservations
+            # Only process confirmed reservations
             reservation_status = reservation.get('status')
-            if reservation_status != 'pending':
+            if reservation_status != 'confirmed':
                 continue
             
             reservation_date_time = reservation.get('reservationDateTime')
@@ -1463,6 +1504,132 @@ def check_for_reservations_2_days_before_reservation_date(request):
             
             # Send reconfirmation messages for all reservations in a single broadcast
             broadcast_result = _send_reconfirmation_broadcast(token, matching_reservations)
+        
+        # Return the JSON of all matching reservations along with broadcast result
+        return Response({
+            "reservations": matching_reservations,
+            "count": len(matching_reservations),
+            "broadcast_result": broadcast_result,
+            "messages_sent": len(matching_reservations) > 0 and broadcast_result and broadcast_result.get("success", False)
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+def _send_reservation_reminder_broadcast(token, reservations, campaign_name='022', template_id='019'):
+    """Send reservation reminder messages via Koala broadcast API for all reservations in a single request."""
+    try:
+        if not reservations:
+            return {"success": False, "error": "No reservations provided"}
+        
+        # Build notification data for all reservations using reminder-specific function
+        notification_data = _build_reminder_notification_data(reservations)
+        
+        if not notification_data:
+            return {"success": False, "error": "No valid notification data could be built from reservations"}
+        
+        # Prepare broadcast payload
+        broadcast_url = 'https://taratechapi.fly.dev/api/koalaplus/broadcast-reservation-success/'
+        broadcast_payload = {
+            'token': token,
+            'campaignName': campaign_name,
+            'templateId': template_id,
+            'notificationData': notification_data,
+        }
+        
+        # Send broadcast request
+        broadcast_response = requests.post(
+            broadcast_url,
+            headers={'Content-Type': 'application/json'},
+            json=broadcast_payload
+        )
+        
+        if broadcast_response.status_code in [200, 201]:
+            return {
+                "success": True,
+                "message": f"Reservation reminder messages sent successfully for {len(notification_data)} reservation(s)",
+                "notifications_sent": len(notification_data)
+            }
+        else:
+            return {
+                "success": False,
+                "error": f"Failed to send broadcast: {broadcast_response.status_code}",
+                "response": broadcast_response.text
+            }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def send_reservation_reminder_for_5pax_and_above_1day_before_reservation_date(request):
+    """Get all pending reservations with 5+ pax that are scheduled 1 day from today. Compares only the date part, not the time.
+    If reservations are found, automatically sends reminder messages via Koala WhatsApp."""
+    supabase = create_supabase_client()
+    try:
+        # Get today's date and calculate target date (1 day from now)
+        today = timezone.localdate()
+        target_date = today + timedelta(days=1)
+        
+        # Get all reservations from the database
+        response = supabase.table('ecosuite_reservations').select('*').execute()
+        all_reservations = response.data or []
+        
+        # Filter reservations where the date part matches the target date, status is pending, and numberOfGuests >= 5
+        matching_reservations = []
+        for reservation in all_reservations:
+            # Only process pending reservations
+            reservation_status = reservation.get('status')
+            if reservation_status == 'verified':
+                continue
+            
+            # Only process reservations with 5 or more guests
+            number_of_guests = reservation.get('numberOfGuests', 0)
+            try:
+                number_of_guests_int = int(number_of_guests) if number_of_guests else 0
+                if number_of_guests_int < 5:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            
+            reservation_date_time = reservation.get('reservationDateTime')
+            if not reservation_date_time:
+                continue
+            
+            try:
+                # Parse the reservation datetime
+                # Handle various ISO format variations
+                reservation_dt = None
+                if 'Z' in reservation_date_time:
+                    reservation_dt = datetime.fromisoformat(reservation_date_time.replace('Z', '+00:00'))
+                elif '+' in reservation_date_time or reservation_date_time.count('-') > 2:
+                    reservation_dt = datetime.fromisoformat(reservation_date_time)
+                else:
+                    reservation_dt = datetime.fromisoformat(reservation_date_time)
+                
+                # Extract only the date part
+                reservation_date = reservation_dt.date()
+                
+                # Check if the reservation date matches the target date (1 day from today)
+                if reservation_date == target_date:
+                    matching_reservations.append(reservation)
+            except Exception as parse_error:
+                # Skip reservations with invalid datetime format
+                continue
+        
+        # If list is not empty, send reminder messages
+        broadcast_result = None
+        if matching_reservations:
+            # Login to Koala to get token
+            token = _login_to_koala()
+            if not token:
+                return Response({
+                    "reservations": matching_reservations,
+                    "count": len(matching_reservations),
+                    "message": "Reservations found but failed to authenticate with Koala. Messages not sent.",
+                    "broadcast_result": None
+                }, status=status.HTTP_200_OK)
+            
+            # Send reminder messages for all reservations in a single broadcast
+            broadcast_result = _send_reservation_reminder_broadcast(token, matching_reservations, campaign_name='019', template_id='019')
         
         # Return the JSON of all matching reservations along with broadcast result
         return Response({
@@ -2226,8 +2393,8 @@ def check_reservation_conflicts(supabase, brand_id, outlet_id, reservation_date_
         time_before_iso = time_before.isoformat()
         time_after_iso = time_after.isoformat()
         
-        # Query for on hold reservations in the time range
-        response = supabase.table('ecosuite_reservations').select('*').eq('brandId', brand_id).eq('outletId', outlet_id).in_('status', ['pending', 'waitlisted','confirmed']).gte('reservationDateTime', time_before_iso).lte('reservationDateTime', time_after_iso).execute()
+        # Query for active reservations in the time range (exclude pending and cancelled)
+        response = supabase.table('ecosuite_reservations').select('*').eq('brandId', brand_id).eq('outletId', outlet_id).in_('status', ['waitlisted', 'confirmed', 'verified']).gte('reservationDateTime', time_before_iso).lte('reservationDateTime', time_after_iso).execute()
         
         # If any on hold reservations exist in this time range, return True (conflict exists)
         if response.data and len(response.data) > 0:
@@ -2331,8 +2498,8 @@ def check_reservation_availability(request):
             time_before = dt - timedelta(hours=2)
             time_after = dt + timedelta(hours=2)
 
-            # Fetch existing reservations in the time window
-            response = supabase.table('ecosuite_reservations').select('*').eq('brandId', brand_id).eq('outletId', outlet_id).in_('status', ['pending', 'waitlisted', 'confirmed', 'verified']).gte('reservationDateTime', time_before.isoformat()).lte('reservationDateTime', time_after.isoformat()).execute()
+            # Fetch existing reservations in the time window (exclude pending and cancelled)
+            response = supabase.table('ecosuite_reservations').select('*').eq('brandId', brand_id).eq('outletId', outlet_id).in_('status', ['waitlisted', 'confirmed', 'verified']).gte('reservationDateTime', time_before.isoformat()).lte('reservationDateTime', time_after.isoformat()).execute()
             
             if response.data:
                 conflicting_reservations = response.data

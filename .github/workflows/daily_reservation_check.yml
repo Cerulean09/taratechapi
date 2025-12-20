@@ -9,9 +9,6 @@ jobs:
   call_endpoint:
     runs-on: ubuntu-latest
     steps:
-      - name: POST to Fly endpoint
+      - name: GET to Fly endpoint
         run: |
-          curl -sS -X POST \
-            "https://taratechapi.fly.dev/api/ecosuite/check-for-reservations-2-days-before-reservation-date/" \
-            -H "Content-Type: application/json" \
-            --data '{}'
+          curl -sS -X GET "https://taratechapi.fly.dev/api/ecosuite/check-for-reservations-2-days-before-reservation-date/"
