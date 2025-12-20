@@ -1414,8 +1414,8 @@ def _send_reconfirmation_broadcast(token, reservations):
         broadcast_url = 'https://taratechapi.fly.dev/api/koalaplus/broadcast-reservation-success/'
         broadcast_payload = {
             'token': token,
-            'campaignName': '017',
-            'templateId': '017',
+            'campaignName': '022',
+            'templateId': '022',
             'notificationData': notification_data,
         }
         
@@ -2493,18 +2493,62 @@ def check_reservation_availability(request):
         pax_per_table = 2
         has_capacity_conflict = False
         
+        # Check daily capacity: get all reservations for the entire day (excluding pending and cancelled)
+        daily_total_pax = 0
+        daily_total_tables = 0
+        daily_full = False
+        
+        # Calculate tables needed for the new reservation
+        import math
+        new_reservation_tables = math.ceil(number_of_guests / pax_per_table)
+        
         try:
             dt = datetime.fromisoformat(reservation_date_time.replace('Z', '+00:00'))
             time_before = dt - timedelta(hours=2)
             time_after = dt + timedelta(hours=2)
+            
+            # Get the date part for daily capacity check
+            reservation_date = dt.date()
+            # Create start and end of day in timezone-aware format
+            day_start = timezone.make_aware(datetime.combine(reservation_date, datetime.min.time()))
+            day_end = timezone.make_aware(datetime.combine(reservation_date, datetime.max.time()))
+            
+            # Fetch all reservations for the entire day (exclude pending and cancelled)
+            daily_response = supabase.table('ecosuite_reservations').select('*').eq('brandId', brand_id).eq('outletId', outlet_id).not_.in_('status', ['pending', 'cancelled']).gte('reservationDateTime', day_start.isoformat()).lte('reservationDateTime', day_end.isoformat()).execute()
+            
+            if daily_response.data:
+                # Calculate total pax and tables for the entire day
+                for reservation in daily_response.data:
+                    guests = reservation.get('numberOfGuests', 0)
+                    try:
+                        guests_int = int(guests) if guests else 0
+                        daily_total_pax += guests_int
+                        tables_needed = math.ceil(guests_int / pax_per_table) if guests_int > 0 else 0
+                        daily_total_tables += tables_needed
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Check if daily total tables (pax / 2 rounded up) equals or exceeds 9
+                daily_total_tables_with_new = daily_total_tables + new_reservation_tables
+                
+                # If daily total tables equals or exceeds 9, day is full
+                # Also check if adding new reservation would make it >= 9
+                if daily_total_tables >= max_tables:
+                    daily_full = True
+                    has_capacity_conflict = True
+                elif daily_total_tables_with_new >= max_tables:
+                    # Day would be full if we add this reservation
+                    daily_full = True
+                    has_capacity_conflict = True
 
             # Fetch existing reservations in the time window (exclude pending and cancelled)
-            response = supabase.table('ecosuite_reservations').select('*').eq('brandId', brand_id).eq('outletId', outlet_id).in_('status', ['waitlisted', 'confirmed', 'verified']).gte('reservationDateTime', time_before.isoformat()).lte('reservationDateTime', time_after.isoformat()).execute()
+            response = supabase.table('ecosuite_reservations').select('*').eq('brandId', brand_id).eq('outletId', outlet_id).not_.in_('status', ['pending', 'cancelled']).gte('reservationDateTime', time_before.isoformat()).lte('reservationDateTime', time_after.isoformat()).execute()
             
             if response.data:
                 conflicting_reservations = response.data
                 total_existing_reservations = len(conflicting_reservations)
                 # Calculate total pax and tables used from existing reservations
+                import math
                 for reservation in conflicting_reservations:
                     guests = reservation.get('numberOfGuests', 0)
                     try:
@@ -2512,17 +2556,12 @@ def check_reservation_availability(request):
                         total_existing_pax += guests_int
                         # Calculate tables needed for this reservation
                         # Each table seats max 2 pax, so: ceil(guests / 2)
-                        import math
                         tables_needed = math.ceil(guests_int / pax_per_table) if guests_int > 0 else 0
                         total_tables_used += tables_needed
                     except (ValueError, TypeError):
                         pass
         except Exception as e:
             print(f"Error fetching conflict details: {e}")
-        
-        # Calculate tables needed for the new reservation
-        import math
-        new_reservation_tables = math.ceil(number_of_guests / pax_per_table)
         
         # Check if adding new reservation would exceed capacity
         total_pax_with_new = total_existing_pax + number_of_guests
@@ -2553,7 +2592,9 @@ def check_reservation_availability(request):
         if not has_conflicts:
             message = "Reservations available for this time slot"
         elif has_capacity_conflict:
-            if total_tables_with_new > max_tables:
+            if daily_full:
+                message = f"Daily capacity reached. All {max_tables} tables are already booked for this day ({daily_total_pax} pax, {daily_total_tables} tables). You can join the waitlist."
+            elif total_tables_with_new > max_tables:
                 message = f"Not enough tables available. Current: {total_tables_used}/{max_tables} tables used ({total_existing_pax} pax). Your request needs {new_reservation_tables} table(s) for {number_of_guests} pax. Total would be {total_tables_with_new} tables. You can join the waitlist."
             elif total_existing_pax >= max_capacity or total_pax_with_new > max_capacity:
                 message = f"Capacity limit reached. Current: {total_existing_pax} pax, max: {max_capacity} pax. Your request for {number_of_guests} pax would exceed the limit. You can join the waitlist."
@@ -2567,6 +2608,7 @@ def check_reservation_availability(request):
             "hasConflicts": has_conflicts,
             "hasTimeConflicts": has_time_conflicts,
             "hasCapacityConflict": has_capacity_conflict,
+            "dailyFull": daily_full,
             "conflictReason": conflict_reason,
             "requestedDateTime": reservation_date_time,
             "requestedGuests": number_of_guests,
@@ -2576,6 +2618,8 @@ def check_reservation_availability(request):
             "totalTablesUsed": total_tables_used,
             "totalPaxWithNew": total_pax_with_new,
             "totalTablesWithNew": total_tables_with_new,
+            "dailyTotalPax": daily_total_pax,
+            "dailyTotalTables": daily_total_tables,
             "maxCapacity": max_capacity,
             "maxTables": max_tables,
             "paxPerTable": pax_per_table,
