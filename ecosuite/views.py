@@ -963,7 +963,7 @@ def upsert_reservation(request, reservation_id):
                 'numberOfGuests': data.get('numberOfGuests'),
                 'reservationDateTime': data.get('reservationDateTime'),
                 'status': data.get('status', 'pending'),
-                'tableId': data.get('tableId'),
+                'tableIds': data.get('tableIds'),
                 'notes': data.get('notes'),
                 'utcOffset': data.get('utcOffset'),
                 'createdAt': data.get('createdAt', now),
@@ -975,6 +975,7 @@ def upsert_reservation(request, reservation_id):
                 'checkedInBy': data.get('checkedInBy', None),
                 'checkedOutAt': data.get('checkedOutAt', None),
                 'checkedOutBy': data.get('checkedOutBy', None),
+                'waitlistedAt': data.get('waitlistedAt', None),
             }
             
             # Insert reservation
@@ -1018,8 +1019,8 @@ def upsert_reservation(request, reservation_id):
                 update_data['reservationDateTime'] = data.get('reservationDateTime')
             if 'status' in data:
                 update_data['status'] = data.get('status')
-            if 'tableId' in data:
-                update_data['tableId'] = data.get('tableId')
+            if 'tableIds' in data:
+                update_data['tableIds'] = data.get('tableIds')
             if 'notes' in data:
                 update_data['notes'] = data.get('notes')
             if 'utcOffset' in data:
@@ -1034,6 +1035,8 @@ def upsert_reservation(request, reservation_id):
                 update_data['checkedOutAt'] = data.get('checkedOutAt')
             if 'checkedOutBy' in data:
                 update_data['checkedOutBy'] = data.get('checkedOutBy')
+            if 'waitlistedAt' in data:
+                update_data['waitlistedAt'] = data.get('waitlistedAt')
             
             # Update reservation
             response = supabase.table('ecosuite_reservations').update(update_data).eq('id', reservation_id).execute()
