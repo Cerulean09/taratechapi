@@ -1712,7 +1712,7 @@ def _build_cancel_notification_data(reservations):
         # Append notification data item with empty paramData
         notification_data.append({
             "phoneNumber": phone_number_international,
-            "paramData": [],
+            "paramData": ['https://reservation.supagetti.com/'],
         })
     
     return notification_data
