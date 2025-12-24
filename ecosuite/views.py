@@ -1811,6 +1811,9 @@ def send_cancel_notification_for_confirmed_reservations_1day_before_reservation_
         
         # If list is not empty, send cancel notification messages
         broadcast_result = None
+        updated_reservations = []
+        failed_updates = []
+        
         if matching_reservations:
             # Login to Koala to get token
             token = _login_to_koala()
@@ -1824,16 +1827,152 @@ def send_cancel_notification_for_confirmed_reservations_1day_before_reservation_
             
             # Send cancel notification messages for all reservations in a single broadcast
             broadcast_result = _send_cancel_broadcast(token, matching_reservations, campaign_name='026', template_id='026')
+            
+            # If broadcast was successful, update all reservations to cancelled status
+            if broadcast_result and broadcast_result.get("success", False):
+                now = timezone.now().isoformat()
+                for reservation in matching_reservations:
+                    reservation_id = reservation.get('id')
+                    if not reservation_id:
+                        continue
+                    
+                    try:
+                        # Update reservation status to cancelled
+                        update_data = {
+                            'status': 'cancelled',
+                            'updatedAt': now
+                        }
+                        
+                        update_response = supabase.table('ecosuite_reservations').update(update_data).eq('id', reservation_id).execute()
+                        
+                        if update_response.data and len(update_response.data) > 0:
+                            updated_reservations.append(reservation_id)
+                        else:
+                            failed_updates.append({
+                                "reservation_id": reservation_id,
+                                "error": "Failed to update reservation status"
+                            })
+                    except Exception as update_error:
+                        failed_updates.append({
+                            "reservation_id": reservation_id,
+                            "error": str(update_error)
+                        })
         
         # Return the JSON of all matching reservations along with broadcast result
         return Response({
             "reservations": matching_reservations,
             "count": len(matching_reservations),
             "broadcast_result": broadcast_result,
-            "messages_sent": len(matching_reservations) > 0 and broadcast_result and broadcast_result.get("success", False)
+            "messages_sent": len(matching_reservations) > 0 and broadcast_result and broadcast_result.get("success", False),
+            "updated_reservations": updated_reservations,
+            "updated_count": len(updated_reservations),
+            "failed_updates": failed_updates,
+            "failed_count": len(failed_updates)
         }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def check_waitlisted_reservations_with_confirmedExpiryDateTime_expired(request):
+    """Check all reservations that have confirmedExpiryDateTime that is not None or null.
+    If the current datetime (in WIB/Jakarta timezone) is past the confirmedExpiryDateTime,
+    set the reservation's status to cancelled."""
+    supabase = create_supabase_client()
+    try:
+        # Get current datetime in Jakarta timezone
+        current_datetime = timezone.now()
+        
+        # Get all reservations from the database
+        response = supabase.table('ecosuite_reservations').select('*').execute()
+        all_reservations = response.data or []
+        
+        # Filter reservations with confirmedExpiryDateTime that is not None or null
+        expired_reservations = []
+        for reservation in all_reservations:
+            confirmed_expiry_date_time = reservation.get('confirmedExpiryDateTime')
+            
+            # Skip if confirmedExpiryDateTime is None or null
+            if not confirmed_expiry_date_time:
+                continue
+            
+            try:
+                # Parse the confirmedExpiryDateTime
+                # Handle various ISO format variations
+                expiry_dt = None
+                if 'Z' in confirmed_expiry_date_time:
+                    expiry_dt = datetime.fromisoformat(confirmed_expiry_date_time.replace('Z', '+00:00'))
+                elif '+' in confirmed_expiry_date_time or confirmed_expiry_date_time.count('-') > 2:
+                    expiry_dt = datetime.fromisoformat(confirmed_expiry_date_time)
+                else:
+                    expiry_dt = datetime.fromisoformat(confirmed_expiry_date_time)
+                
+                # Make expiry_dt timezone-aware if it's naive (assume Jakarta timezone)
+                if expiry_dt.tzinfo is None:
+                    expiry_dt = timezone.make_aware(expiry_dt)
+                else:
+                    # Convert to Jakarta timezone for comparison
+                    expiry_dt = expiry_dt.astimezone(timezone.get_current_timezone())
+                
+                # Check if current datetime (already in Jakarta timezone) is past the expiry datetime
+                if current_datetime > expiry_dt:
+                    expired_reservations.append(reservation)
+            except Exception as parse_error:
+                # Skip reservations with invalid datetime format
+                continue
+        
+        # Update expired reservations to cancelled status
+        updated_reservations = []
+        failed_updates = []
+        
+        if expired_reservations:
+            now = timezone.now().isoformat()
+            for reservation in expired_reservations:
+                reservation_id = reservation.get('id')
+                if not reservation_id:
+                    continue
+                
+                try:
+                    # Update reservation status to cancelled
+                    update_data = {
+                        'status': 'cancelled',
+                        'updatedAt': now
+                    }
+                    
+                    update_response = supabase.table('ecosuite_reservations').update(update_data).eq('id', reservation_id).execute()
+                    
+                    if update_response.data and len(update_response.data) > 0:
+                        updated_reservations.append({
+                            "reservation_id": reservation_id,
+                            "confirmedExpiryDateTime": reservation.get('confirmedExpiryDateTime'),
+                            "previous_status": reservation.get('status')
+                        })
+                    else:
+                        failed_updates.append({
+                            "reservation_id": reservation_id,
+                            "error": "Failed to update reservation status"
+                        })
+                except Exception as update_error:
+                    failed_updates.append({
+                        "reservation_id": reservation_id,
+                        "error": str(update_error)
+                    })
+        
+        # Return the results
+        return Response({
+            "expired_reservations": expired_reservations,
+            "expired_count": len(expired_reservations),
+            "updated_reservations": updated_reservations,
+            "updated_count": len(updated_reservations),
+            "failed_updates": failed_updates,
+            "failed_count": len(failed_updates),
+            "current_datetime": current_datetime.isoformat()
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({
+            "error": str(e),
+            "error_type": type(e).__name__
+        }, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -3081,10 +3220,12 @@ def confirm_reservation(request, reservation_id):
         # If action is provided, process it
         if action:
             if action.lower() == 'confirm':
-                # Update reservation status to confirmed
+                # Update reservation status to confirmed and clear waitlistedAt and confirmedExpiryDateTime
                 update_data = {
                     'status': 'confirmed',
-                    'updatedAt': timezone.now().isoformat()
+                    'updatedAt': timezone.now().isoformat(),
+                    'waitlistedAt': None,
+                    'confirmedExpiryDateTime': None
                 }
                 update_response = supabase.table('ecosuite_reservations').update(update_data).eq('id', reservation_id).execute()
                 
@@ -3133,7 +3274,9 @@ def confirm_reservation(request, reservation_id):
         try:
             verify_update = {
                 'status': 'verified',
-                'updatedAt': timezone.now().isoformat()
+                'updatedAt': timezone.now().isoformat(),
+                'waitlistedAt': None,
+                'confirmedExpiryDateTime': None
             }
             verify_response = supabase.table('ecosuite_reservations').update(verify_update).eq('id', reservation_id).execute()
 
