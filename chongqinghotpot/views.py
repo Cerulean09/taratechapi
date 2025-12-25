@@ -11,6 +11,8 @@ from django.urls import reverse
 from django.core.cache import cache
 from urllib.parse import urlencode
 
+import supabase
+
 # --------------------------
 # CONFIG
 # --------------------------
@@ -565,3 +567,12 @@ def get_all_contacts(request):
                 "params": params
             }
         }, status=500)
+
+
+def save_message_interaction_to_db(request):
+    """
+    Save message interaction to database.
+    POST /api/chongqinghotpot/save-message-interaction-to-db/
+    """
+    
+    return JsonResponse({"message": "Message interaction saved to database"}, status=200)

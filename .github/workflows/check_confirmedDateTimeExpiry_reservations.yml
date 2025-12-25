@@ -24,4 +24,4 @@ jobs:
         if: steps.timecheck.outputs.run == 'true'
         run: |
           curl -X POST \
-          https://taratechapi.fly.dev/api/ecosuite/check_waitlisted_reservations_with_confirmedExpiryDateTime_expired/
+          https://taratechapi.fly.dev/api/ecosuite/check-waitlisted-reservations-with-confirmedExpiryDateTime-expired/

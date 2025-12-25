@@ -12,4 +12,7 @@ urlpatterns = [
     
     # CRM API Endpoints
     path("get-all-contacts/", get_all_contacts, name="get_all_contacts"),
+
+    # Qontak message interactions
+    path("save-message-interaction-to-db/", save_message_interaction_to_db, name="save_message_interaction_to_db"),
 ]
