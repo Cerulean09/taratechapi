@@ -4,6 +4,10 @@ from .views import *
 urlpatterns = [
     path("get-all-whatsapp-templates/", get_all_whatsapp_templates, name="get_all_whatsapp_templates"),
     path("get-all-rooms/", get_all_rooms, name="get_all_rooms"),
+
+    # Qontak message interactions
+    path("handle-message-interaction-webhook/", handle_message_interaction_webhook, name="handle_message_interaction_webhook"),
+
     
     # CRM OAuth Flow
     path("crm/login/", crm_login, name="crm_login"),

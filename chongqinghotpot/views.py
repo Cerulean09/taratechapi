@@ -6,12 +6,17 @@ import json
 from datetime import datetime, timezone
 import time
 import os
+import uuid
 from django.http import JsonResponse, HttpResponseRedirect
 from django.urls import reverse
 from django.core.cache import cache
 from urllib.parse import urlencode
+from django.utils import timezone as django_timezone
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny
 
 import supabase
+from supabase import create_client, Client, ClientOptions
 
 # --------------------------
 # CONFIG
@@ -501,6 +506,118 @@ def get_all_rooms(request):
 
     return JsonResponse(data, status=http_code)
 
+def create_cq_hotpot_supabase_client() -> Client:
+    """Create Supabase client for Chongqing Hotpot using CQ_HOTPOT_SUPABASE credentials."""
+    url = os.getenv('CQ_HOTPOT_SUPABASE_CLIENT_URL')
+    key = os.getenv('CQ_HOTPOT_SUPABASE_CLIENT_SECRET')
+    if not url or not key:
+        raise Exception("CQ_HOTPOT_SUPABASE_CLIENT_URL and CQ_HOTPOT_SUPABASE_CLIENT_SECRET environment variables must be set")
+    return create_client(url, key, options=ClientOptions())
+
+def set_message_interaction_settings(request):
+    pass
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def handle_message_interaction_webhook(request):
+    """
+    Handle webhook from Qontak for message interactions.
+    Receives webhook data and uploads it to Supabase table 'qontak_message_interactions'.
+    
+    Expected data structure:
+    {
+        "id": "string",
+        "type": "string",
+        "room_id": "string",
+        ...
+    }
+    
+    Maps to Supabase model:
+    - id: UUID v1 (String)
+    - createdAt: DateTime
+    - rawJson: Map<String, dynamic> (entire response from qontak)
+    - type: String (from response)
+    - utcOffset: number (default 0)
+    """
+    try:
+        # Handle GET requests (webhook verification)
+        if request.method == 'GET':
+            return JsonResponse({
+                "message": "Webhook endpoint is active",
+                "status": "ok"
+            }, status=200)
+        
+        # Get webhook data from request (POST)
+        webhook_data = request.data if hasattr(request, 'data') else {}
+        
+        # # If data is empty, try to get from request body
+        # if not webhook_data:
+        #     try:
+        #         if request.body:
+        #             webhook_data = json.loads(request.body)
+        #     except (json.JSONDecodeError, AttributeError):
+        #         pass
+        
+        if not webhook_data:
+            # Treat as verification ping / empty event
+            return JsonResponse({"status": "ok"}, status=200)
+        
+        
+
+        
+        # Extract type from webhook data
+        message_type = webhook_data.get('type', '')
+        
+        # Generate UUID v1 for the id
+        record_id = str(uuid.uuid1())
+        
+        # Get current datetime in UTC (since running on fly.io with UTC time)
+        current_datetime = datetime.now(timezone.utc)
+        
+        # Prepare data for Supabase
+        print('Saving message interaction to database... 0')
+        supabase_data = {
+            'id': record_id,
+            'createdAt': current_datetime.isoformat(),
+            'rawJson': webhook_data,  # Store entire webhook data as JSON
+            'type': message_type,
+            'utcOffset': 0  # Default to 0 since running on fly.io with UTC time
+        }
+        
+        # Create Supabase client and insert data
+        print('Saving message interaction to database... 1')
+        supabase_client = create_cq_hotpot_supabase_client()
+        print('Saving message interaction to database... 2')
+        try:
+            response = supabase_client.table('qontak_message_interactions').insert(supabase_data).execute()
+        except Exception as e:
+            print('Error saving message interaction to database...')
+            print(e)
+            return JsonResponse({
+                "error": "Failed to save message interaction",
+                "response": str(e)
+            }, status=500)
+            
+        print('Saving message interaction to database... 3')
+        if response.data:
+            print('Successfully saved message interaction to database')
+            return JsonResponse({
+                "message": "Message interaction saved successfully",
+                "id": record_id,
+                "type": message_type,
+                "created_at": current_datetime.isoformat()
+            }, status=201)
+        else:
+            return JsonResponse({
+                "error": "Failed to save message interaction",
+                "response": str(response)
+            }, status=500)
+            
+    except Exception as e:
+        return JsonResponse({
+            "error": str(e),
+            "error_type": type(e).__name__
+        }, status=500)
 
 def get_all_contacts(request):
     """
@@ -576,3 +693,58 @@ def save_message_interaction_to_db(request):
     """
     
     return JsonResponse({"message": "Message interaction saved to database"}, status=200)
+
+    """
+    Test endpoint for handle_message_interaction_webhook.
+    Tests uploading to Supabase with sample data.
+    GET or POST /api/chongqinghotpot/test-handle-message-interaction-webhook/
+    """
+    try:
+        # Create test webhook data with rawJson = {"text":"this works well"}
+        test_webhook_data = {
+            "text": "this works well"
+        }
+        
+        # Extract type from test data (or use default)
+        message_type = test_webhook_data.get('type', 'test')
+        
+        # Generate UUID v1 for the id
+        record_id = str(uuid.uuid1())
+        
+        # Get current datetime in UTC (since running on fly.io with UTC time)
+        current_datetime = datetime.now(timezone.utc)
+        
+        # Prepare data for Supabase
+        supabase_data = {
+            'id': record_id,
+            'createdAt': current_datetime.isoformat(),
+            'rawJson': test_webhook_data,  # Store test data as JSON
+            'type': message_type,
+            'utcOffset': 0  # Default to 0 since running on fly.io with UTC time
+        }
+        
+        # Create Supabase client and insert data
+        supabase_client = create_cq_hotpot_supabase_client()
+        response = supabase_client.table('qontak_message_interactions').insert(supabase_data).execute()
+        
+        if response.data:
+            return JsonResponse({
+                "message": "Test message interaction saved successfully",
+                "id": record_id,
+                "type": message_type,
+                "created_at": current_datetime.isoformat(),
+                "rawJson": test_webhook_data,
+                "supabase_response": response.data[0] if response.data else None
+            }, status=201)
+        else:
+            return JsonResponse({
+                "error": "Failed to save test message interaction",
+                "response": str(response),
+                "supabase_data": supabase_data
+            }, status=500)
+            
+    except Exception as e:
+        return JsonResponse({
+            "error": str(e),
+            "error_type": type(e).__name__
+        }, status=500)

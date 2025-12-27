@@ -976,6 +976,7 @@ def upsert_reservation(request, reservation_id):
                 'checkedOutAt': data.get('checkedOutAt', None),
                 'checkedOutBy': data.get('checkedOutBy', None),
                 'waitlistedAt': data.get('waitlistedAt', None),
+                'confirmedExpiryDateTime': data.get('confirmedExpiryDateTime', None),
             }
             
             # Insert reservation
@@ -1037,7 +1038,9 @@ def upsert_reservation(request, reservation_id):
                 update_data['checkedOutBy'] = data.get('checkedOutBy')
             if 'waitlistedAt' in data:
                 update_data['waitlistedAt'] = data.get('waitlistedAt')
-            
+            if 'confirmedExpiryDateTime' in data:
+                update_data['confirmedExpiryDateTime'] = data.get('confirmedExpiryDateTime')
+
             # Update reservation
             response = supabase.table('ecosuite_reservations').update(update_data).eq('id', reservation_id).execute()
             
@@ -1104,6 +1107,7 @@ def upsert_crm_customer(request, customer_id):
                 'createdBy': data.get('createdBy', request.user.id),
                 'updatedBy': data.get('updatedBy', request.user.id),
                 'utcOffset': data.get('utcOffset'),
+                'confirmedExpiryDateTime': data.get('confirmedExpiryDateTime'),
             }
 
             response = supabase.table('ecosuite_crm_customers').insert(customer_data).execute()
@@ -1142,7 +1146,9 @@ def upsert_crm_customer(request, customer_id):
                 update_data['createdBy'] = data.get('createdBy')
             if 'utcOffset' in data:
                 update_data['utcOffset'] = data.get('utcOffset')
-
+            if 'confirmedExpiryDateTime' in data:
+                update_data['confirmedExpiryDateTime'] = data.get('confirmedExpiryDateTime')
+        
             response = supabase.table('ecosuite_crm_customers').update(update_data).eq('id', customer_id).execute()
 
             if response.data:
@@ -1914,8 +1920,13 @@ def check_waitlisted_reservations_with_confirmedExpiryDateTime_expired(request):
                     # Convert to Jakarta timezone for comparison
                     expiry_dt = expiry_dt.astimezone(timezone.get_current_timezone())
                 
-                # Check if current datetime (already in Jakarta timezone) is past the expiry datetime
-                if current_datetime > expiry_dt:
+                # Round both datetimes to the minute level (disregard seconds and microseconds)
+                current_datetime_minute = current_datetime.replace(second=0, microsecond=0)
+                expiry_dt_minute = expiry_dt.replace(second=0, microsecond=0)
+                
+                # Check if current datetime (already in Jakarta timezone) is >= the expiry datetime at minute level
+                # If equal (same minute), already consider it expired
+                if current_datetime_minute >= expiry_dt_minute:
                     expired_reservations.append(reservation)
             except Exception as parse_error:
                 # Skip reservations with invalid datetime format
