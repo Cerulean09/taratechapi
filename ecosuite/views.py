@@ -16,6 +16,110 @@ from datetime import datetime, timedelta
 from django.utils import timezone
 import requests
 
+def create_esb_header(request, additional_headers=None):
+    headers = {
+        "Authorization": f"Bearer {os.getenv('SUPAGETTI_ESB_TOKEN')}",
+        "Content-Type": "application/json",
+    }
+    if additional_headers:
+        headers.update(additional_headers)
+    return headers
+
+def get_branch_list(request):
+    return Response({
+        "message": "Branch list fetched successfully",
+        "data": "data"
+    }, status=status.HTTP_200_OK)
+
+@api_view(["POST"])
+def reservation_to_esb_order(request):
+
+    headers = create_esb_header(request, additional_headers={"Data-Company":"SAE","Data-Branch": "SUPG"})
+
+    url = os.getenv("ESB_URL_STAGING_INT", "").rstrip("/") + "/qsv1/order"
+
+    request_body =   {
+        "orderType": "custom",
+        "orderTypeName": "reservation by tara tech",
+        "fullName": request.data.get('customerName'),
+        "email": request.data.get('customerEmail'),
+        "phoneNumber": request.data.get('customerPhone'),
+        "visitPurposeID": "64",
+        "deliveryAddress": "Jl Raya Pos Pengumben No 188C",
+        "deliveryAddressInfo": "",
+        "latitude": -6.2087634,
+        "longitude": 106.845599,
+        "memberID": "",
+        "salesMenus": [
+             {
+            "ID": datetime.now().timestamp(),
+            "menuID": 1,
+            "qty": 1,
+            "extras": [],
+            "packages": [],
+            "notes": ""
+        },
+        ],
+        "promotionCode": "",
+        "vouchers": [],
+        "paymentMethodID": "ovo",
+        "amount": 0,
+        "returnUrl": "https://int-eso.esb.co.id/payment-notification",
+        "refApp": None,
+        "userToken": "",
+        "paymentPhoneNumber": request.data.get('customerPhone'),
+        "tableName": request.data.get('tableName'),
+        "tokenID": "",
+        "authenticationID": "",
+        "cvn": "",
+        "bin": "",
+        "customerNotes": f"Reservation ID : {request.data.get('reservationId')}",
+        "additionalCustomerInfo": None,
+        "salesModeParams": False,
+        "giftVoucher": None,
+        "questionAnswer": [
+            {
+                "ID": 1,
+                "desc": "Are you satisfied?",
+                "value": "Yes"
+            }
+        ],
+        "deliveryCourierID": 5,
+        "scheduledAt": None,
+        "platformFees": None,
+        "deliveryCourierID": 5,
+        "scheduledAt": None,
+        "platformFees": None,
+    }
+
+
+    esb_resp = requests.post(url, headers=headers, timeout=20, json=request_body)
+
+    if esb_resp.status_code != 200:
+        return Response({
+            "message": "Failed to create ESB order",
+            "data": esb_resp.text
+        }, status=status.HTTP_400_BAD_REQUEST)
+    return Response({
+        "message": "Reservation to ESB order fetched successfully",
+        "data": "data"
+    }, status=status.HTTP_200_OK)
+
+@api_view(["GET"])
+def get_branch_data(request):
+    header = create_esb_header(request, additional_headers={"Data-Company":"SAE","Data-Branch": "SUPG"})
+
+    url = os.getenv("ESB_URL_STAGING_INT", "").rstrip("/") + "/qsv1/setting/branch"
+    esb_resp = requests.get(url, headers=header, timeout=20)
+
+    if esb_resp.status_code != 200:
+        return Response(
+            {"message": "Failed to fetch branch data", "data": esb_resp.text},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    return Response(esb_resp.json(), status=status.HTTP_200_OK)
+
 def resolve_request_environment(request):
     if hasattr(request, 'query_params'):
         env = request.query_params.get('environment')
@@ -1347,28 +1451,44 @@ def _login_to_koala():
         return None
 
 def _build_notification_data(reservations):
-    """Build notification data array from a list of reservations."""
+    """Build notification data array from a list of reservations.
+    Returns a tuple: (notification_data, skipped_reservations)
+    where skipped_reservations is a list of dicts with reservation_id and reason."""
     notification_data = []
+    skipped_reservations = []
     
     for reservation in reservations:
+        reservation_id = reservation.get('id')
+        
         # Parse phone number
         customer_phone = reservation.get('customerPhone')
         if not customer_phone:
+            skipped_reservations.append({
+                "reservation_id": reservation_id,
+                "reason": "Missing customer phone number"
+            })
             continue
         
         phone_number_international = _parse_phone_to_international(customer_phone)
         if not phone_number_international:
+            skipped_reservations.append({
+                "reservation_id": reservation_id,
+                "reason": "Invalid phone number format"
+            })
             continue
         
         # Format date and time
         reservation_date_time = reservation.get('reservationDateTime')
         if not reservation_date_time:
+            skipped_reservations.append({
+                "reservation_id": reservation_id,
+                "reason": "Missing reservation date/time"
+            })
             continue
         
         formatted_date = _format_full_date(reservation_date_time)
         formatted_time = _format_time_for_koala(reservation_date_time)
         pax = reservation.get('numberOfGuests', 0)
-        reservation_id = reservation.get('id')
         
         # Prepare confirmation URL
         confirmation_url = f'https://taratechapi.fly.dev/api/ecosuite/confirm-reservation/{reservation_id}/'
@@ -1384,7 +1504,7 @@ def _build_notification_data(reservations):
             ],
         })
     
-    return notification_data
+    return notification_data, skipped_reservations
 
 def _build_reminder_notification_data(reservations):
     """Build notification data array from a list of reservations for reminder messages.
@@ -1428,23 +1548,40 @@ def _build_reminder_notification_data(reservations):
     return notification_data
 
 def _send_reconfirmation_broadcast(token, reservations, campaign_name='025', template_id='025'):
-    """Send reconfirmation messages via Koala broadcast API for all reservations in a single request."""
+    """Send reconfirmation messages via Koala broadcast API for all reservations in a single request.
+    Returns dict with success status, notifications sent, skipped reservations, and any errors."""
     try:
         if not reservations:
-            return {"success": False, "error": "No reservations provided"}
+            return {
+                "success": False,
+                "error": "No reservations provided",
+                "notifications_sent": 0,
+                "reservations_processed": 0,
+                "reservations_skipped": [],
+                "skipped_count": 0
+            }
+        
+        reservations_count = len(reservations)
         
         # Build notification data for all reservations
-        notification_data = _build_notification_data(reservations)
+        notification_data, skipped_reservations = _build_notification_data(reservations)
         
         if not notification_data:
-            return {"success": False, "error": "No valid notification data could be built from reservations"}
+            return {
+                "success": False,
+                "error": "No valid notification data could be built from reservations",
+                "notifications_sent": 0,
+                "reservations_processed": reservations_count,
+                "reservations_skipped": skipped_reservations,
+                "skipped_count": len(skipped_reservations)
+            }
         
         # Prepare broadcast payload
         broadcast_url = 'https://taratechapi.fly.dev/api/koalaplus/broadcast-reservation-success/'
         broadcast_payload = {
             'token': token,
-            'campaignName': '025',
-            'templateId': '025',
+            'campaignName': campaign_name,
+            'templateId': template_id,
             'notificationData': notification_data,
         }
         
@@ -1459,16 +1596,30 @@ def _send_reconfirmation_broadcast(token, reservations, campaign_name='025', tem
             return {
                 "success": True,
                 "message": f"Reconfirmation messages sent successfully for {len(notification_data)} reservation(s)",
-                "notifications_sent": len(notification_data)
+                "notifications_sent": len(notification_data),
+                "reservations_processed": reservations_count,
+                "reservations_skipped": skipped_reservations,
+                "skipped_count": len(skipped_reservations)
             }
         else:
             return {
                 "success": False,
                 "error": f"Failed to send broadcast: {broadcast_response.status_code}",
-                "response": broadcast_response.text
+                "response": broadcast_response.text,
+                "notifications_sent": 0,
+                "reservations_processed": reservations_count,
+                "reservations_skipped": skipped_reservations,
+                "skipped_count": len(skipped_reservations)
             }
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {
+            "success": False,
+            "error": str(e),
+            "notifications_sent": 0,
+            "reservations_processed": len(reservations) if reservations else 0,
+            "reservations_skipped": [],
+            "skipped_count": 0
+        }
 
 @api_view(['GET'])
 @permission_classes([AllowAny])
@@ -1530,32 +1681,42 @@ def check_for_reservations_2_days_before_reservation_date(request):
                 # Skip reservations with invalid datetime format
                 continue
         
-        # Send reconfirmation messages for 1-4 pax (confirmed reservations)
-        broadcast_result_1_4 = None
-        if matching_reservations_1_4_pax:
-            # Login to Koala to get token
+        # Authenticate once if either group has reservations (efficient single authentication)
+        token = None
+        has_reservations = len(matching_reservations_1_4_pax) > 0 or len(matching_reservations_5_plus_pax) > 0
+        if has_reservations:
             token = _login_to_koala()
             if not token:
-                # Don't return early, continue to process 5+ pax group
-                broadcast_result_1_4 = {"success": False, "error": "Failed to authenticate with Koala"}
+                # If authentication fails, set error for both groups
+                broadcast_result_1_4 = {"success": False, "error": "Failed to authenticate with Koala"} if matching_reservations_1_4_pax else None
+                broadcast_result_5_plus = {"success": False, "error": "Failed to authenticate with Koala"} if matching_reservations_5_plus_pax else None
             else:
-                # Send reconfirmation messages for all reservations in a single broadcast
-                broadcast_result_1_4 = _send_reconfirmation_broadcast(token, matching_reservations_1_4_pax, campaign_name='025', template_id='025')
-        
-        # Send reconfirmation messages for 5+ pax (verified reservations)
-        broadcast_result_5_plus = None
-        if matching_reservations_5_plus_pax:
-            # Login to Koala to get token
-            token = _login_to_koala()
-            if not token:
-                broadcast_result_5_plus = {"success": False, "error": "Failed to authenticate with Koala"}
-            else:
-                # Send reconfirmation messages for all reservations in a single broadcast
-                broadcast_result_5_plus = _send_reconfirmation_broadcast(token, matching_reservations_5_plus_pax, campaign_name='028', template_id='028')
+                # Send reconfirmation messages for 1-4 pax (confirmed reservations)
+                broadcast_result_1_4 = None
+                if matching_reservations_1_4_pax:
+                    broadcast_result_1_4 = _send_reconfirmation_broadcast(token, matching_reservations_1_4_pax, campaign_name='025', template_id='025')
+                
+                # Send reconfirmation messages for 5+ pax (verified reservations)
+                broadcast_result_5_plus = None
+                if matching_reservations_5_plus_pax:
+                    broadcast_result_5_plus = _send_reconfirmation_broadcast(token, matching_reservations_5_plus_pax, campaign_name='028', template_id='028')
+        else:
+            broadcast_result_1_4 = None
+            broadcast_result_5_plus = None
         
         # Determine if messages were sent successfully
         messages_sent_1_4 = len(matching_reservations_1_4_pax) > 0 and broadcast_result_1_4 and broadcast_result_1_4.get("success", False)
         messages_sent_5_plus = len(matching_reservations_5_plus_pax) > 0 and broadcast_result_5_plus and broadcast_result_5_plus.get("success", False)
+        
+        # Collect skipped reservations from both groups
+        skipped_1_4 = broadcast_result_1_4.get("reservations_skipped", []) if broadcast_result_1_4 else []
+        skipped_5_plus = broadcast_result_5_plus.get("reservations_skipped", []) if broadcast_result_5_plus else []
+        all_skipped = skipped_1_4 + skipped_5_plus
+        
+        # Get notification counts
+        notifications_sent_1_4 = broadcast_result_1_4.get("notifications_sent", 0) if broadcast_result_1_4 else 0
+        notifications_sent_5_plus = broadcast_result_5_plus.get("notifications_sent", 0) if broadcast_result_5_plus else 0
+        total_notifications_sent = notifications_sent_1_4 + notifications_sent_5_plus
         
         # Return the JSON of all matching reservations along with broadcast results
         return Response({
@@ -1569,7 +1730,12 @@ def check_for_reservations_2_days_before_reservation_date(request):
             "broadcast_result_5_plus_pax": broadcast_result_5_plus,
             "messages_sent_1_4_pax": messages_sent_1_4,
             "messages_sent_5_plus_pax": messages_sent_5_plus,
-            "messages_sent": messages_sent_1_4 or messages_sent_5_plus
+            "messages_sent": messages_sent_1_4 or messages_sent_5_plus,
+            "notifications_sent_1_4_pax": notifications_sent_1_4,
+            "notifications_sent_5_plus_pax": notifications_sent_5_plus,
+            "total_notifications_sent": total_notifications_sent,
+            "skipped_reservations": all_skipped,
+            "skipped_count": len(all_skipped)
         }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)

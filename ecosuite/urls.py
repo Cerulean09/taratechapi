@@ -47,4 +47,10 @@ urlpatterns = [
     path('pivot/check-all-pending-payments/', views.pivot_check_all_pending_payments, name='pivot_check_all_pending_payments'),
     # path('pivot/confirm-payment/', views.pivot_confirm_payment, name='pivot_confirm_payment'),
     # path('pivot/payment-method-configs/', views.pivot_payment_method_configs, name='pivot_payment_method_configs'),
+
+    # ESB Integration
+    path('esb/get-branch-list/', views.get_branch_list, name='get_branch_list'),
+    path('esb/get-branch-data/', views.get_branch_data, name='get_branch_data'),
+    path('esb/reservation-to-esb-order/', views.reservation_to_esb_order, name='reservation_to_esb_order'),
+
 ]
