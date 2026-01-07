@@ -43,6 +43,8 @@ urlpatterns = [
     path('check-waitlisted-reservations-with-confirmedExpiryDateTime-expired/', views.check_waitlisted_reservations_with_confirmedExpiryDateTime_expired, name='check_waitlisted_reservations_with_confirmedExpiryDateTime_expired'),
     path('reservations/commit/', views.commit_reservation, name='commit_reservations'),
     path('slots/generate/', views.generate_capacity_slots, name='generate_capacity_slots'),
+    path('slots/audit/', views.audit_capacity_slots, name='audit_capacity_slots'),
+    path('slots/available/', views.get_available_capacity_slots, name='get_available_capacity_slots'),
     
     # Pivot Integration
     path('pivot/create-payment/', views.pivot_create_payment, name='pivot_create_payment'),

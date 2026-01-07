@@ -430,10 +430,16 @@ def generate_capacity_slots(request):
                                 # If existing slot doesn't have an ID, generate one and update
                                 if not existing_slot_id:
                                     new_slot_id = str(uuid.uuid4())
+                                    update_data = {'id': new_slot_id}
+                                    
+                                    # Also ensure maxWaitlistedPax and waitlistedPax exist (backfill)
+                                    if 'maxWaitlistedPax' not in existing_slot_data or existing_slot_data.get('maxWaitlistedPax') is None:
+                                        update_data['maxWaitlistedPax'] = 10
+                                    if 'waitlistedPax' not in existing_slot_data or existing_slot_data.get('waitlistedPax') is None:
+                                        update_data['waitlistedPax'] = 0
+                                    
                                     try:
-                                        supabase.table('ecosuite_capacity_slot').update({
-                                            'id': new_slot_id
-                                        }).eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+                                        supabase.table('ecosuite_capacity_slot').update(update_data).eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
                                         outlet_slots_created += 1  # Count as created since we updated it
                                         total_slots_created += 1
                                     except Exception as update_error:
@@ -454,6 +460,8 @@ def generate_capacity_slots(request):
                                     'channel': 'both',
                                     'maxPax': max_pax,
                                     'usedPax': 0,
+                                    'maxWaitlistedPax': 10,
+                                    'waitlistedPax': 0,
                                     'version': 0
                                 }
                                 
@@ -743,16 +751,17 @@ def commit_reservation(request):
             )
 
         # 2️⃣ Check ALL affected capacity slots and validate availability
-        # If capacity is exceeded and joinWaitlist is True, we'll handle it differently
+        # Check both usedPax and waitlistedPax capacity
         capacity_exceeded = False
+        waitlist_full = False
         missing_slots = []
         slot_ids = []  # Collect slot IDs for the reservation
         
         for slot in affected_slots:
             slot_start_iso = slot.isoformat()
             
-            # Check capacity slot with channel="both" - also get the ID
-            capacity_slot = supabase.table('ecosuite_capacity_slot').select('id, usedPax, maxPax').eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+            # Check capacity slot with channel="both" - also get the ID and waitlist fields
+            capacity_slot = supabase.table('ecosuite_capacity_slot').select('id, usedPax, maxPax, waitlistedPax, maxWaitlistedPax').eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
             
             if not capacity_slot.data:
                 missing_slots.append(slot_start_iso)
@@ -762,29 +771,40 @@ def commit_reservation(request):
             slot_id = slot_data.get('id')
             current_used = slot_data.get('usedPax', 0)
             max_capacity = slot_data.get('maxPax', 0)
+            current_waitlisted = slot_data.get('waitlistedPax', 0)
+            max_waitlisted = slot_data.get('maxWaitlistedPax', 10)  # Default to 10 if not set
             
             # Collect slot ID (collect for all slots, even if capacity exceeded)
             if slot_id:
                 slot_ids.append(slot_id)
             
+            # Check if regular capacity is full
             if current_used + pax > max_capacity:
-                if join_waitlist:
-                    capacity_exceeded = True
-                    # Continue collecting slot IDs for all affected slots even if capacity exceeded
-                    # This allows us to track which slots the waitlisted reservation is trying to use
+                # Regular capacity is full, check waitlist
+                if current_waitlisted + pax > max_waitlisted:
+                    # Both regular and waitlist are full - deny reservation
+                    waitlist_full = True
+                    # Don't return here, continue checking all slots to see if any slot has availability
+                    # We'll return error after checking all slots
                 else:
-                    return Response(
-                        {
-                            "error": "CAPACITY_EXCEEDED",
-                            "message": f"Capacity exceeded for the requested time slot. Current: {current_used}/{max_capacity}, Requested: {pax}",
-                            "currentUsed": current_used,
-                            "maxCapacity": max_capacity,
-                            "requestedPax": pax,
-                            "slotStart": slot_start_iso,
-                            "suggestion": "Set joinWaitlist=true to join the waitlist"
-                        },
-                        status=status.HTTP_409_CONFLICT,
-                    )
+                    # Waitlist has capacity - can join waitlist
+                    if join_waitlist:
+                        capacity_exceeded = True  # Mark as waitlisted
+                    else:
+                        return Response(
+                            {
+                                "error": "CAPACITY_EXCEEDED",
+                                "message": f"Regular capacity is full. Current: {current_used}/{max_capacity}, Waitlist available: {max_waitlisted - current_waitlisted}",
+                                "currentUsed": current_used,
+                                "maxCapacity": max_capacity,
+                                "currentWaitlisted": current_waitlisted,
+                                "maxWaitlisted": max_waitlisted,
+                                "requestedPax": pax,
+                                "slotStart": slot_start_iso,
+                                "suggestion": "Set joinWaitlist=true to join the waitlist"
+                            },
+                            status=status.HTTP_409_CONFLICT,
+                        )
         
         # If any slots are missing, provide a detailed error
         if missing_slots:
@@ -800,26 +820,52 @@ def commit_reservation(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 3️⃣ Update capacity slots (increment usedPax) only if capacity is available
-        if not capacity_exceeded:
-            for slot in affected_slots:
+        # If waitlist is full, deny the reservation
+        if waitlist_full:
+            return Response(
+                {
+                    "error": "WAITLIST_FULL",
+                    "message": "Both regular capacity and waitlist are full. Reservation cannot be accepted.",
+                    "suggestion": "Please try a different time slot."
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        # 3️⃣ Update capacity slots (increment usedPax or waitlistedPax) based on availability
+        for slot in affected_slots:
                 slot_start_iso = slot.isoformat()
                 
                 # Get current values for atomic update
-                capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax').eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+                capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax, maxPax, waitlistedPax, maxWaitlistedPax').eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
                 
                 if capacity_slot.data:
-                    current_used = capacity_slot.data[0].get('usedPax', 0)
-                    # Update using Supabase update with increment
-                    supabase.table('ecosuite_capacity_slot').update({
-                        'usedPax': current_used + pax,
-                    }).eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+                    slot_info = capacity_slot.data[0]
+                    current_used = slot_info.get('usedPax', 0)
+                    max_capacity = slot_info.get('maxPax', 0)
+                    current_waitlisted = slot_info.get('waitlistedPax', 0)
+                    max_waitlisted = slot_info.get('maxWaitlistedPax', 10)
+                    
+                    # Determine if we should increment usedPax or waitlistedPax
+                    if capacity_exceeded:
+                        # Capacity is full, increment waitlistedPax
+                        if current_waitlisted + pax <= max_waitlisted:
+                            supabase.table('ecosuite_capacity_slot').update({
+                                'waitlistedPax': current_waitlisted + pax,
+                            }).eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+                    else:
+                        # Capacity available, increment usedPax
+                        if current_used + pax <= max_capacity:
+                            supabase.table('ecosuite_capacity_slot').update({
+                                'usedPax': current_used + pax,
+                            }).eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
 
         # 4️⃣ Create reservation using Supabase
         reservation_id = str(uuid.uuid4())
         now = timezone.now().isoformat()
         
         # Determine reservation status
+        # If waitlist is full, reservation should be denied (but we already returned error above)
+        # If capacity exceeded but waitlist available, set to waitlisted
         reservation_status = 'waitlisted' if capacity_exceeded else 'confirmed'
         
         reservation_data = {
@@ -895,6 +941,402 @@ def commit_reservation(request):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        
+        if os.getenv('DEBUG', 'False').lower() == 'true':
+            error_details["traceback"] = traceback.format_exc()
+        
+        return Response(
+            error_details,
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def audit_capacity_slots(request):
+    """
+    Audit and reconcile capacity slots with reservations.
+    
+    This function:
+    1. Fetches all reservations with status in ['pending', 'onHold', 'confirmed', 'verified', 'waitlisted']
+    2. Filters for current and future reservations (reservationDateTime >= now)
+    3. Cross-references reservations with capacity slots:
+       - Regular reservations (pending, onHold, confirmed, verified) → usedPax
+       - Waitlisted reservations → waitlistedPax
+    4. Updates capacity slots if there are mismatches
+    
+    Optional request body:
+    - brandId: Filter by specific brand (optional, audits all brands if not provided)
+    """
+    supabase = create_supabase_client()
+    try:
+        # Parse request data
+        data = request.data
+        if hasattr(data, '_content') and data.get('_content'):
+            import json
+            try:
+                content_str = data.get('_content')[0] if isinstance(data.get('_content'), list) else data.get('_content')
+                data = json.loads(content_str)
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+        if hasattr(data, 'dict'):
+            data = data.dict()
+        elif hasattr(data, 'get') and not isinstance(data, dict):
+            data = dict(data)
+        
+        brand_id = data.get('brandId')  # Optional brand filter
+        
+        # Get current time for filtering future reservations
+        now = timezone.now()
+        now_iso = now.isoformat()
+        
+        # Define status groups
+        regular_statuses = ['pending', 'onHold', 'confirmed', 'verified']
+        waitlisted_status = 'waitlisted'
+        all_relevant_statuses = regular_statuses + [waitlisted_status]
+        
+        # 1️⃣ Fetch all relevant reservations (current and future)
+        query = supabase.table('ecosuite_reservations').select('id, brandId, slotIds, numberOfGuests, status, reservationDateTime').in_('status', all_relevant_statuses).gte('reservationDateTime', now_iso)
+        
+        if brand_id:
+            query = query.eq('brandId', brand_id)
+        
+        reservations_response = query.execute()
+        
+        if not reservations_response.data:
+            return Response(
+                {
+                    "message": "No reservations found to audit",
+                    "auditedSlots": 0,
+                    "updatedSlots": 0,
+                    "mismatches": []
+                },
+                status=status.HTTP_200_OK,
+            )
+        
+        reservations = reservations_response.data
+        
+        # 2️⃣ Group reservations by slotId and calculate totals
+        # Structure: {slot_id: {'usedPax': total, 'waitlistedPax': total}}
+        slot_totals = {}
+        
+        for reservation in reservations:
+            slot_ids = reservation.get('slotIds', [])
+            number_of_guests = reservation.get('numberOfGuests', 0)
+            reservation_status = reservation.get('status', '')
+            
+            # Skip reservations without slotIds
+            if not slot_ids or not isinstance(slot_ids, list):
+                continue
+            
+            # Process each slotId in the reservation
+            for slot_id in slot_ids:
+                if not slot_id:
+                    continue
+                
+                if slot_id not in slot_totals:
+                    slot_totals[slot_id] = {
+                        'usedPax': 0,
+                        'waitlistedPax': 0
+                    }
+                
+                # Add to appropriate counter based on status
+                if reservation_status in regular_statuses:
+                    slot_totals[slot_id]['usedPax'] += number_of_guests
+                elif reservation_status == waitlisted_status:
+                    slot_totals[slot_id]['waitlistedPax'] += number_of_guests
+        
+        if not slot_totals:
+            return Response(
+                {
+                    "message": "No reservations with slotIds found to audit",
+                    "auditedSlots": 0,
+                    "updatedSlots": 0,
+                    "mismatches": []
+                },
+                status=status.HTTP_200_OK,
+            )
+        
+        # 3️⃣ Fetch all affected capacity slots
+        slot_ids_list = list(slot_totals.keys())
+        
+        # Fetch slots in batches (Supabase has limits on IN queries)
+        batch_size = 100
+        all_slots = []
+        slots_by_id = {}
+        
+        for i in range(0, len(slot_ids_list), batch_size):
+            batch = slot_ids_list[i:i + batch_size]
+            slots_response = supabase.table('ecosuite_capacity_slot').select('id, brandId, slotStart, channel, usedPax, waitlistedPax').in_('id', batch).execute()
+            
+            if slots_response.data:
+                all_slots.extend(slots_response.data)
+                for slot in slots_response.data:
+                    slot_id = slot.get('id')
+                    if slot_id:
+                        slots_by_id[slot_id] = slot
+        
+        # 4️⃣ Compare and update slots
+        updated_slots = []
+        mismatches = []
+        audited_count = 0
+        
+        # Process slots that have reservations
+        for slot_id, totals in slot_totals.items():
+            slot = slots_by_id.get(slot_id)
+            if not slot:
+                # Slot not found - might have been deleted, skip it
+                continue
+            
+            audited_count += 1
+            current_used_pax = slot.get('usedPax', 0) or 0
+            current_waitlisted_pax = slot.get('waitlistedPax', 0) or 0
+            
+            expected_used_pax = totals['usedPax']
+            expected_waitlisted_pax = totals['waitlistedPax']
+            
+            # Check for mismatches
+            needs_update = False
+            update_data = {}
+            
+            if current_used_pax != expected_used_pax:
+                needs_update = True
+                update_data['usedPax'] = expected_used_pax
+                mismatches.append({
+                    'slotId': slot_id,
+                    'slotStart': slot.get('slotStart'),
+                    'field': 'usedPax',
+                    'current': current_used_pax,
+                    'expected': expected_used_pax,
+                    'difference': expected_used_pax - current_used_pax
+                })
+            
+            if current_waitlisted_pax != expected_waitlisted_pax:
+                needs_update = True
+                update_data['waitlistedPax'] = expected_waitlisted_pax
+                mismatches.append({
+                    'slotId': slot_id,
+                    'slotStart': slot.get('slotStart'),
+                    'field': 'waitlistedPax',
+                    'current': current_waitlisted_pax,
+                    'expected': expected_waitlisted_pax,
+                    'difference': expected_waitlisted_pax - current_waitlisted_pax
+                })
+            
+            # Update slot if there's a mismatch
+            if needs_update:
+                try:
+                    supabase.table('ecosuite_capacity_slot').update(update_data).eq('id', slot_id).execute()
+                    updated_slots.append({
+                        'slotId': slot_id,
+                        'slotStart': slot.get('slotStart'),
+                        'updates': update_data
+                    })
+                except Exception as update_error:
+                    mismatches.append({
+                        'slotId': slot_id,
+                        'slotStart': slot.get('slotStart'),
+                        'error': f"Failed to update: {str(update_error)}"
+                    })
+        
+        # 5️⃣ Return audit results
+        return Response(
+            {
+                "message": "Capacity slot audit completed",
+                "auditedSlots": audited_count,
+                "updatedSlots": len(updated_slots),
+                "mismatchesFound": len(mismatches),
+                "reservationsProcessed": len(reservations),
+                "slotsWithReservations": len(slot_totals),
+                "updatedSlotsDetails": updated_slots,
+                "mismatches": mismatches
+            },
+            status=status.HTTP_200_OK,
+        )
+    
+    except Exception as e:
+        error_str = str(e)
+        import traceback
+        error_details = {
+            "error": error_str,
+            "error_type": type(e).__name__
+        }
+        
+        if os.getenv('DEBUG', 'False').lower() == 'true':
+            error_details["traceback"] = traceback.format_exc()
+        
+        return Response(
+            error_details,
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+@api_view(['GET', 'POST'])
+@permission_classes([AllowAny])
+def get_available_capacity_slots(request):
+    """
+    Get all available capacity slots (slots that are not full).
+    
+    A slot is considered available if:
+    - Regular capacity: usedPax < maxPax
+    - Optionally: waitlist capacity available (waitlistedPax < maxWaitlistedPax)
+    
+    Query parameters (GET) or request body (POST):
+    - brandId: Filter by brand ID (optional)
+    - outletId: Filter by outlet ID (optional)
+    - startDate: Filter slots from this date (ISO format, optional, defaults to now)
+    - endDate: Filter slots until this date (ISO format, optional)
+    - includeWaitlistInfo: Include waitlist availability info (boolean, default: true)
+    - limit: Maximum number of results (optional, default: 1000)
+    - offset: Pagination offset (optional, default: 0)
+    
+    Returns slots with:
+    - id, brandId, outletId, slotStart, channel
+    - maxPax, usedPax, availablePax (maxPax - usedPax)
+    - maxWaitlistedPax, waitlistedPax, availableWaitlistPax (if includeWaitlistInfo=true)
+    """
+    supabase = create_supabase_client()
+    try:
+        # Parse request data (support both GET and POST)
+        if request.method == 'GET':
+            data = request.query_params.dict()
+        else:
+            data = request.data
+            if hasattr(data, '_content') and data.get('_content'):
+                import json
+                try:
+                    content_str = data.get('_content')[0] if isinstance(data.get('_content'), list) else data.get('_content')
+                    data = json.loads(content_str)
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    pass
+            if hasattr(data, 'dict'):
+                data = data.dict()
+            elif hasattr(data, 'get') and not isinstance(data, dict):
+                data = dict(data)
+        
+        brand_id = data.get('brandId')
+        outlet_id = data.get('outletId')
+        start_date_str = data.get('startDate')
+        end_date_str = data.get('endDate')
+        include_waitlist_info = data.get('includeWaitlistInfo', 'true').lower() == 'true'
+        limit = int(data.get('limit', 1000))
+        offset = int(data.get('offset', 0))
+        
+        # Get current time for filtering future slots
+        now = timezone.now()
+        now_iso = now.isoformat()
+        
+        # Build query
+        query = supabase.table('ecosuite_capacity_slot').select('id, brandId, outletId, slotStart, channel, maxPax, usedPax, maxWaitlistedPax, waitlistedPax')
+        
+        # Filter by brandId
+        if brand_id:
+            query = query.eq('brandId', brand_id)
+        
+        # Filter by outletId
+        if outlet_id:
+            query = query.eq('outletId', outlet_id)
+        
+        # Filter by date range
+        if start_date_str:
+            try:
+                start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00'))
+                if start_date.tzinfo is None:
+                    start_date = timezone.make_aware(start_date)
+                query = query.gte('slotStart', start_date.isoformat())
+            except (ValueError, AttributeError):
+                return Response(
+                    {"error": "Invalid startDate format. Use ISO format (e.g., 2026-01-01T00:00:00Z)"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            # Default to current time if no startDate provided
+            query = query.gte('slotStart', now_iso)
+        
+        if end_date_str:
+            try:
+                end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+                if end_date.tzinfo is None:
+                    end_date = timezone.make_aware(end_date)
+                query = query.lte('slotStart', end_date.isoformat())
+            except (ValueError, AttributeError):
+                return Response(
+                    {"error": "Invalid endDate format. Use ISO format (e.g., 2026-01-31T23:59:59Z)"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Filter by channel (only 'both' slots)
+        query = query.eq('channel', 'both')
+        
+        # Order by slotStart (ascending)
+        query = query.order('slotStart', desc=False)
+        
+        # Execute query
+        slots_response = query.execute()
+        
+        if not slots_response.data:
+            return Response(
+                {
+                    "message": "No capacity slots found",
+                    "availableSlots": [],
+                    "count": 0
+                },
+                status=status.HTTP_200_OK,
+            )
+        
+        # Filter for available slots (usedPax < maxPax)
+        available_slots = []
+        for slot in slots_response.data:
+            used_pax = slot.get('usedPax', 0) or 0
+            max_pax = slot.get('maxPax', 0) or 0
+            
+            # Only include slots with available capacity
+            if used_pax < max_pax:
+                slot_info = {
+                    'id': slot.get('id'),
+                    'brandId': slot.get('brandId'),
+                    'outletId': slot.get('outletId'),
+                    'slotStart': slot.get('slotStart'),
+                    'channel': slot.get('channel'),
+                    'maxPax': max_pax,
+                    'usedPax': used_pax,
+                    'availablePax': max_pax - used_pax,
+                    'capacityPercentage': round((used_pax / max_pax * 100) if max_pax > 0 else 0, 2)
+                }
+                
+                # Include waitlist info if requested
+                if include_waitlist_info:
+                    max_waitlisted = slot.get('maxWaitlistedPax', 10) or 10
+                    waitlisted_pax = slot.get('waitlistedPax', 0) or 0
+                    slot_info['maxWaitlistedPax'] = max_waitlisted
+                    slot_info['waitlistedPax'] = waitlisted_pax
+                    slot_info['availableWaitlistPax'] = max_waitlisted - waitlisted_pax
+                    slot_info['waitlistCapacityPercentage'] = round((waitlisted_pax / max_waitlisted * 100) if max_waitlisted > 0 else 0, 2)
+                
+                available_slots.append(slot_info)
+        
+        # Apply pagination
+        total_count = len(available_slots)
+        paginated_slots = available_slots[offset:offset + limit]
+        
+        return Response(
+            {
+                "message": "Available capacity slots retrieved successfully",
+                "availableSlots": paginated_slots,
+                "count": len(paginated_slots),
+                "totalCount": total_count,
+                "offset": offset,
+                "limit": limit,
+                "hasMore": (offset + limit) < total_count
+            },
+            status=status.HTTP_200_OK,
+        )
+    
+    except Exception as e:
+        error_str = str(e)
+        import traceback
+        error_details = {
+            "error": error_str,
+            "error_type": type(e).__name__
+        }
         
         if os.getenv('DEBUG', 'False').lower() == 'true':
             error_details["traceback"] = traceback.format_exc()
