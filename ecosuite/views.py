@@ -420,7 +420,7 @@ def generate_capacity_slots(request):
                             slot_start_iso = current_slot.isoformat()
                             
                             # Check if slot already exists (composite key: outletId, slotStart, channel)
-                            existing_slot = supabase.table('ecosuite_capacity_slot').select('brandId, slotStart, channel').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+                            existing_slot = supabase.table('ecosuite_capacity_slot').select('brandId, slotStart, channel').eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
                             
                             # Skip if slot already exists
                             if existing_slot.data and len(existing_slot.data) > 0:
@@ -648,7 +648,7 @@ def commit_reservation(request):
             slot_start_iso = slot.isoformat()
             
             # Check capacity slot with channel="both"
-            capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax, maxPax').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+            capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax, maxPax').eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
             
             if not capacity_slot.data:
                 raise Exception(f"CAPACITY_SLOT_NOT_FOUND: Slot at {slot_start_iso} does not exist")
@@ -665,7 +665,7 @@ def commit_reservation(request):
             slot_start_iso = slot.isoformat()
             
             # Get current values for atomic update
-            capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+            capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax').eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
             
             if capacity_slot.data:
                 current_used = capacity_slot.data[0].get('usedPax', 0)
@@ -673,7 +673,7 @@ def commit_reservation(request):
                 supabase.table('ecosuite_capacity_slot').update({
                     'usedPax': current_used + pax,
                     'updatedAt': timezone.now().isoformat()
-                }).eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+                }).eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
 
         # 4️⃣ Create reservation using Supabase upsert
         reservation_id = str(uuid.uuid4())
@@ -681,7 +681,7 @@ def commit_reservation(request):
         
         reservation_data = {
             'id': reservation_id,
-            'outletId': outlet_id,
+            'brandId': brand_id,
             'reservationDateTime': reservation_time.isoformat(),
             'numberOfGuests': pax,
             'status': 'confirmed',
