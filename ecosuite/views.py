@@ -324,7 +324,7 @@ def generate_capacity_slots(request):
         supabase = create_supabase_client()
         
         # Fetch brand data
-        brand_response = supabase.table('ecosuite_brands').select('*').eq('brandId', brand_id).execute()
+        brand_response = supabase.table('ecosuite_brands').select('*').eq('id', brand_id).execute()
         
         if not brand_response.data:
             return Response(
@@ -420,7 +420,7 @@ def generate_capacity_slots(request):
                             slot_start_iso = current_slot.isoformat()
                             
                             # Check if slot already exists (composite key: outletId, slotStart, channel)
-                            existing_slot = supabase.table('ecosuite_capacity_slot').select('id, outletId, slotStart, channel').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+                            existing_slot = supabase.table('ecosuite_capacity_slot').select('brandId, slotStart, channel').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
                             
                             # Skip if slot already exists
                             if existing_slot.data and len(existing_slot.data) > 0:
@@ -429,7 +429,7 @@ def generate_capacity_slots(request):
                             else:
                                 # Create single slot with channel="both"
                                 slot_data = {
-                                    'outletId': outlet_id,
+                                    'brandId': brand_id,
                                     'slotStart': slot_start_iso,
                                     'channel': 'both',
                                     'maxPax': max_pax,
