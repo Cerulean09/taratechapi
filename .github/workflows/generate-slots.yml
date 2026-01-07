@@ -12,9 +12,12 @@ jobs:
     steps:
       - name: Call slot generation endpoint
         run: |
+          # Generates capacity slots with channel="both" for all outlets in a brand
+          # Slots are created based on each outlet's operational hours from ecosuite_brands
+          # Each slot is created with maxPax from operating hours, usedPax=0, version=0
           response=$(curl -X POST "https://taratechapi.fly.dev/api/ecosuite/slots/generate/" \
             -H "Content-Type: application/json" \
-            -d '{"outletId": "ILY79IOQG6","totalCapacity": 16,"onlineCapacity": 16}' \
+            -d '{"brandId": "ILY79IOQG6"}' \
             -w "\nHTTP_STATUS:%{http_code}" \
             -s -S)
           

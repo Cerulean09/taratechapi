@@ -303,130 +303,185 @@ DAYS_AHEAD = 30
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def generate_capacity_slots(request):
-    """Generate capacity slots for an outlet.
+    """Generate capacity slots for all outlets in a brand based on their operational hours.
+    Creates slots with channel="both" for each 30-minute time slot based on operating hours.
     Expected fields in request body:
-    - outletId: The outlet identifier
-    - totalCapacity: Total capacity for the outlet
-    - onlineCapacity: Online booking capacity
+    - brandId: The brand identifier
+    
+    Note: Each slot is created with channel="both", version=0, and usedPax=0
+    Slots are generated based on onlineOperatingHours from each outlet in the brand.
     """
     try:
         # Validate required fields
-        outlet_id = request.data.get("outletId")
-        total_capacity = request.data.get("totalCapacity")
-        online_capacity = request.data.get("onlineCapacity")
+        brand_id = request.data.get("brandId")
         
-        if not outlet_id:
+        if not brand_id:
             return Response(
-                {"error": "Missing required field: outletId"},
+                {"error": "Missing required field: brandId"},
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+        supabase = create_supabase_client()
         
-        if total_capacity is None:
+        # Fetch brand data
+        brand_response = supabase.table('ecosuite_brands').select('*').eq('id', brand_id).execute()
+        
+        if not brand_response.data:
             return Response(
-                {"error": "Missing required field: totalCapacity"},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": "Brand not found"},
+                status=status.HTTP_404_NOT_FOUND
             )
         
-        if online_capacity is None:
-            return Response(
-                {"error": "Missing required field: onlineCapacity"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        brand = brand_response.data[0]
+        outlets = brand.get('outlets', [])
         
-        # Validate capacity values
-        try:
-            total_capacity = int(total_capacity)
-            online_capacity = int(online_capacity)
-        except (ValueError, TypeError):
+        if not outlets:
             return Response(
-                {"error": "totalCapacity and onlineCapacity must be integers"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        if total_capacity < 0 or online_capacity < 0:
-            return Response(
-                {"error": "Capacity values must be non-negative"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        if online_capacity > total_capacity:
-            return Response(
-                {"error": "onlineCapacity cannot exceed totalCapacity"},
+                {"error": "No outlets found for this brand"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         today = timezone.now().date()
         end_date = today + timedelta(days=DAYS_AHEAD)
         
-        slots_created = 0
-        slots_skipped = 0
-        
-        supabase = create_supabase_client()
-        current_date = today
+        total_slots_created = 0
+        total_slots_skipped = 0
+        outlet_results = []
 
-        while current_date <= end_date:
-            # Create start time at 10:00 AM for the current date
-            start_time = timezone.make_aware(
-                datetime.combine(current_date, datetime.min.time())
-            ).replace(hour=10, minute=0, second=0, microsecond=0)
+        # Process each outlet
+        for outlet in outlets:
+            outlet_id = outlet.get('id')
+            if not outlet_id:
+                continue
+            
+            outlet_name = outlet.get('name', outlet_id)
+            online_operating_hours = outlet.get('onlineOperatingHours', {})
+            total_capacity = outlet.get('totalCapacity', 0)
+            
+            day_based_hours = online_operating_hours.get('dayBasedHours', [])
+            date_exceptions = online_operating_hours.get('dateExceptions', [])
+            
+            # Create a map of date exceptions for quick lookup
+            exception_map = {}
+            for exception in date_exceptions:
+                exception_date = exception.get('date')
+                if exception_date:
+                    exception_map[exception_date] = exception
+            
+            outlet_slots_created = 0
+            outlet_slots_skipped = 0
+            current_date = today
 
-            # End time at 10:00 PM (22:00)
-            end_time = start_time.replace(hour=22, minute=0, second=0, microsecond=0)
-
-            current_slot = start_time
-            while current_slot < end_time:
-                slot_start_iso = current_slot.isoformat()
+            while current_date <= end_date:
+                date_str = current_date.isoformat()
+                day_of_week = current_date.weekday()  # 0 = Monday, 6 = Sunday
                 
-                # TOTAL capacity slot - use upsert
-                total_slot_data = {
-                    'outletId': outlet_id,
-                    'slotStart': slot_start_iso,
-                    'channel': 'all',
-                    'maxPax': total_capacity,
-                    'usedPax': 0
-                }
-                
-                # Check if slot already exists
-                existing_total = supabase.table('ecosuite_capacity_slot').select('id').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'all').execute()
-                
-                if not existing_total.data:
-                    supabase.table('ecosuite_capacity_slot').insert(total_slot_data).execute()
-                    slots_created += 1
+                # Check for date exception first
+                operating_hours = None
+                if date_str in exception_map:
+                    exception = exception_map[date_str]
+                    if not exception.get('isClosed', False):
+                        operating_hours = exception
                 else:
-                    slots_skipped += 1
-
-                # ONLINE capacity slot - use upsert
-                online_slot_data = {
-                    'outletId': outlet_id,
-                    'slotStart': slot_start_iso,
-                    'channel': 'online',
-                    'maxPax': online_capacity,
-                    'usedPax': 0
-                }
+                    # Use day-based hours
+                    day_hours = next((dh for dh in day_based_hours if dh.get('day') == day_of_week), None)
+                    if day_hours and day_hours.get('openTime') is not None:
+                        operating_hours = day_hours
                 
-                # Check if slot already exists
-                existing_online = supabase.table('ecosuite_capacity_slot').select('id').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'online').execute()
-                
-                if not existing_online.data:
-                    supabase.table('ecosuite_capacity_slot').insert(online_slot_data).execute()
-                    slots_created += 1
-                else:
-                    slots_skipped += 1
+                if operating_hours:
+                    # Get open and close times
+                    open_time_obj = operating_hours.get('openTime')
+                    close_time_obj = operating_hours.get('closeTime')
+                    
+                    if open_time_obj and close_time_obj:
+                        open_hour = open_time_obj.get('hour', 0)
+                        open_minute = open_time_obj.get('minute', 0)
+                        close_hour = close_time_obj.get('hour', 23)
+                        close_minute = close_time_obj.get('minute', 59)
+                        
+                        # Get maxPax from operating hours or use totalCapacity
+                        max_pax = operating_hours.get('maxPax', total_capacity)
+                        if max_pax is None or max_pax <= 0:
+                            max_pax = total_capacity
+                        
+                        # Create start and end times for this date
+                        start_time = timezone.make_aware(
+                            datetime.combine(current_date, datetime.min.time())
+                        ).replace(hour=open_hour, minute=open_minute, second=0, microsecond=0)
+                        
+                        end_time = timezone.make_aware(
+                            datetime.combine(current_date, datetime.min.time())
+                        ).replace(hour=close_hour, minute=close_minute, second=0, microsecond=0)
+                        
+                        # Generate slots for this day in 30-minute increments
+                        # Start from openTime and create slots every 30 minutes until closeTime
+                        current_slot = start_time
+                        while current_slot < end_time:
+                            slot_start_iso = current_slot.isoformat()
+                            
+                            # Check if slot already exists (composite key: outletId, slotStart, channel)
+                            existing_slot = supabase.table('ecosuite_capacity_slot').select('id, outletId, slotStart, channel').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+                            
+                            # Skip if slot already exists
+                            if existing_slot.data and len(existing_slot.data) > 0:
+                                outlet_slots_skipped += 1
+                                total_slots_skipped += 1
+                            else:
+                                # Create single slot with channel="both"
+                                slot_data = {
+                                    'outletId': outlet_id,
+                                    'slotStart': slot_start_iso,
+                                    'channel': 'both',
+                                    'maxPax': max_pax,
+                                    'usedPax': 0,
+                                    'version': 0
+                                }
+                                
+                                try:
+                                    # Attempt to insert the slot
+                                    insert_response = supabase.table('ecosuite_capacity_slot').insert(slot_data).execute()
+                                    
+                                    # Verify the insert was successful
+                                    if insert_response.data and len(insert_response.data) > 0:
+                                        outlet_slots_created += 1
+                                        total_slots_created += 1
+                                    else:
+                                        # Insert returned no data, might be duplicate
+                                        outlet_slots_skipped += 1
+                                        total_slots_skipped += 1
+                                except Exception as insert_error:
+                                    # Handle duplicate key errors or other insert errors
+                                    error_str = str(insert_error).lower()
+                                    if 'duplicate' in error_str or 'unique' in error_str or 'conflict' in error_str:
+                                        # Slot already exists, skip it
+                                        outlet_slots_skipped += 1
+                                        total_slots_skipped += 1
+                                    else:
+                                        # Re-raise if it's a different error
+                                        raise
 
-                current_slot += timedelta(minutes=SLOT_MINUTES)
+                            # Increment by 30 minutes for the next slot
+                            current_slot += timedelta(minutes=SLOT_MINUTES)
 
-            current_date += timedelta(days=1)
+                current_date += timedelta(days=1)
+            
+            outlet_results.append({
+                'outletId': outlet_id,
+                'outletName': outlet_name,
+                'slotsCreated': outlet_slots_created,
+                'slotsSkipped': outlet_slots_skipped
+            })
 
         return Response({
             "status": "slots_generated",
-            "outletId": outlet_id,
+            "brandId": brand_id,
             "dateRange": {
                 "start": today.isoformat(),
                 "end": end_date.isoformat()
             },
-            "slotsCreated": slots_created,
-            "slotsSkipped": slots_skipped,
-            "totalSlots": slots_created + slots_skipped
+            "totalSlotsCreated": total_slots_created,
+            "totalSlotsSkipped": total_slots_skipped,
+            "outlets": outlet_results
         }, status=status.HTTP_200_OK)
 
     except KeyError as e:
@@ -593,55 +648,33 @@ def commit_reservation(request):
         for slot in affected_slots:
             slot_start_iso = slot.isoformat()
             
-            # TOTAL CAPACITY check
-            total_capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax, maxPax').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'all').execute()
+            # Check capacity slot with channel="both"
+            capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax, maxPax').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
             
-            if not total_capacity_slot.data:
-                raise Exception(f"TOTAL_CAPACITY_SLOT_NOT_FOUND: Slot at {slot_start_iso} does not exist")
+            if not capacity_slot.data:
+                raise Exception(f"CAPACITY_SLOT_NOT_FOUND: Slot at {slot_start_iso} does not exist")
             
-            slot_data = total_capacity_slot.data[0]
+            slot_data = capacity_slot.data[0]
             current_used = slot_data.get('usedPax', 0)
             max_capacity = slot_data.get('maxPax', 0)
             
             if current_used + pax > max_capacity:
-                raise Exception("TOTAL_CAPACITY_EXCEEDED")
-
-            # ONLINE CAPACITY check (only if online booking)
-            if channel == "online":
-                online_capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax, maxPax').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'online').execute()
-                
-                if not online_capacity_slot.data:
-                    raise Exception(f"ONLINE_CAPACITY_SLOT_NOT_FOUND: Slot at {slot_start_iso} does not exist")
-                
-                online_slot_data = online_capacity_slot.data[0]
-                online_current_used = online_slot_data.get('usedPax', 0)
-                online_max_capacity = online_slot_data.get('maxPax', 0)
-                
-                if online_current_used + pax > online_max_capacity:
-                    raise Exception("ONLINE_CAPACITY_EXCEEDED")
+                raise Exception("CAPACITY_EXCEEDED")
 
         # 3️⃣ Update capacity slots (increment usedPax)
         for slot in affected_slots:
             slot_start_iso = slot.isoformat()
             
             # Get current values for atomic update
-            total_slot = supabase.table('ecosuite_capacity_slot').select('usedPax').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'all').execute()
-            if total_slot.data:
-                current_used = total_slot.data[0].get('usedPax', 0)
+            capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+            
+            if capacity_slot.data:
+                current_used = capacity_slot.data[0].get('usedPax', 0)
                 # Update using Supabase update with increment
                 supabase.table('ecosuite_capacity_slot').update({
                     'usedPax': current_used + pax,
                     'updatedAt': timezone.now().isoformat()
-                }).eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'all').execute()
-
-            if channel == "online":
-                online_slot = supabase.table('ecosuite_capacity_slot').select('usedPax').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'online').execute()
-                if online_slot.data:
-                    online_current_used = online_slot.data[0].get('usedPax', 0)
-                    supabase.table('ecosuite_capacity_slot').update({
-                        'usedPax': online_current_used + pax,
-                        'updatedAt': timezone.now().isoformat()
-                    }).eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'online').execute()
+                }).eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
 
         # 4️⃣ Create reservation using Supabase upsert
         reservation_id = str(uuid.uuid4())
@@ -693,7 +726,7 @@ def commit_reservation(request):
                 status=status.HTTP_409_CONFLICT,
             )
         
-        if "SLOT_NOT_FOUND" in error_str:
+        if "SLOT_NOT_FOUND" in error_str or "CAPACITY_SLOT_NOT_FOUND" in error_str:
             return Response(
                 {"error": error_str, "message": "Capacity slots have not been generated for this time period"},
                 status=status.HTTP_400_BAD_REQUEST,
