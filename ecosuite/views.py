@@ -324,7 +324,7 @@ def generate_capacity_slots(request):
         supabase = create_supabase_client()
         
         # Fetch brand data
-        brand_response = supabase.table('ecosuite_brands').select('*').eq('id', brand_id).execute()
+        brand_response = supabase.table('ecosuite_brands').select('*').eq('brandId', brand_id).execute()
         
         if not brand_response.data:
             return Response(
