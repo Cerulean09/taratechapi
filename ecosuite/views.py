@@ -297,7 +297,7 @@ def hello(request):
     return JsonResponse({"message": "Hello from Ecosuite!"})
 
 SLOT_MINUTES = 30
-DAYS_AHEAD = 30
+DAYS_AHEAD = 1000000
 
 
 @api_view(["POST"])
@@ -419,16 +419,36 @@ def generate_capacity_slots(request):
                         while current_slot < end_time:
                             slot_start_iso = current_slot.isoformat()
                             
-                            # Check if slot already exists (composite key: outletId, slotStart, channel)
-                            existing_slot = supabase.table('ecosuite_capacity_slot').select('brandId, slotStart, channel').eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+                            # Check if slot already exists (composite key: brandId, slotStart, channel)
+                            existing_slot = supabase.table('ecosuite_capacity_slot').select('id, brandId, slotStart, channel').eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
                             
-                            # Skip if slot already exists
+                            # If slot exists, check if it has an ID and update if missing
                             if existing_slot.data and len(existing_slot.data) > 0:
-                                outlet_slots_skipped += 1
-                                total_slots_skipped += 1
+                                existing_slot_data = existing_slot.data[0]
+                                existing_slot_id = existing_slot_data.get('id')
+                                
+                                # If existing slot doesn't have an ID, generate one and update
+                                if not existing_slot_id:
+                                    new_slot_id = str(uuid.uuid4())
+                                    try:
+                                        supabase.table('ecosuite_capacity_slot').update({
+                                            'id': new_slot_id
+                                        }).eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+                                        outlet_slots_created += 1  # Count as created since we updated it
+                                        total_slots_created += 1
+                                    except Exception as update_error:
+                                        # If update fails, still count as skipped
+                                        outlet_slots_skipped += 1
+                                        total_slots_skipped += 1
+                                else:
+                                    # Slot exists with ID, skip it
+                                    outlet_slots_skipped += 1
+                                    total_slots_skipped += 1
                             else:
-                                # Create single slot with channel="both"
+                                # Create new slot with channel="both" and generate UUID v4 for id
+                                slot_id = str(uuid.uuid4())
                                 slot_data = {
+                                    'id': slot_id,
                                     'brandId': brand_id,
                                     'slotStart': slot_start_iso,
                                     'channel': 'both',
@@ -538,14 +558,53 @@ def commit_reservation(request):
     - reservationDateTime: ISO format datetime string (required)
     - numberOfGuests: Number of guests (will be rounded up to even number) (required)
     - idempotencyKey: Unique key for idempotency (required)
-    - channel: 'online' or 'offline' (defaults to 'online')
+    - channel: 'both'
     - customerName: Customer name (optional)
     - customerPhone: Customer phone number (optional)
     - notes: Reservation notes (optional)
     - joinWaitlist: Boolean flag for waitlist (optional)
     """
     try:
+        # Handle case where JSON is in _content field (QueryDict format)
+        # This can happen if the request Content-Type isn't properly set
         data = request.data
+        
+        # Check if data is a QueryDict with _content field containing JSON
+        if hasattr(data, 'get') and data.get('_content'):
+            import json
+            try:
+                content_value = data.get('_content')
+                # Handle both list and string formats
+                if isinstance(content_value, list) and len(content_value) > 0:
+                    content_str = content_value[0]
+                elif isinstance(content_value, str):
+                    content_str = content_value
+                else:
+                    content_str = str(content_value)
+                
+                # Parse JSON from _content field
+                data = json.loads(content_str)
+            except (json.JSONDecodeError, TypeError, AttributeError, ValueError) as e:
+                # If parsing fails, return error
+                return Response(
+                    {
+                        "error": "Failed to parse request body as JSON",
+                        "message": str(e),
+                        "received_content": str(data.get('_content', ''))[:200]  # First 200 chars
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        
+        # If data is still a QueryDict, try to convert it to a dict
+        elif hasattr(data, 'dict'):
+            data = data.dict()
+        elif hasattr(data, 'get') and not isinstance(data, dict):
+            # Convert QueryDict to regular dict (this might not work for nested data)
+            try:
+                data = dict(data)
+            except (TypeError, ValueError):
+                # If conversion fails, data might already be in correct format
+                pass
 
         # Validate required fields
         brand_id = data.get("brandId")
@@ -588,21 +647,34 @@ def commit_reservation(request):
         try:
             # Handle ISO format with or without timezone
             if 'Z' in reservation_date_time_str:
-                reservation_time = timezone.make_aware(
-                    datetime.fromisoformat(reservation_date_time_str.replace('Z', '+00:00'))
-                )
-            elif '+' in reservation_date_time_str or reservation_date_time_str.count('-') > 2:
-                reservation_time = timezone.make_aware(
-                    datetime.fromisoformat(reservation_date_time_str)
-                )
+                # Parse UTC time (Z means UTC)
+                dt = datetime.fromisoformat(reservation_date_time_str.replace('Z', '+00:00'))
+                reservation_time = dt  # Keep as UTC
+            elif '+' in reservation_date_time_str or (reservation_date_time_str.count('-') > 2 and 'T' in reservation_date_time_str):
+                # Has timezone offset
+                dt = datetime.fromisoformat(reservation_date_time_str)
+                reservation_time = dt  # Keep with its timezone
             else:
-                # Assume local timezone if no timezone info
-                reservation_time = timezone.make_aware(
-                    datetime.fromisoformat(reservation_date_time_str)
-                )
+                # No timezone info - assume UTC
+                dt = datetime.fromisoformat(reservation_date_time_str)
+                reservation_time = timezone.make_aware(dt, timezone.utc)
         except (ValueError, TypeError) as e:
             return Response(
-                {"error": f"Invalid reservationDateTime format: {str(e)}"},
+                {
+                    "error": "Invalid reservationDateTime format",
+                    "message": str(e),
+                    "received": reservation_date_time_str
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        except Exception as e:
+            return Response(
+                {
+                    "error": "Failed to parse reservationDateTime",
+                    "message": str(e),
+                    "received": reservation_date_time_str,
+                    "error_type": type(e).__name__
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -620,10 +692,10 @@ def commit_reservation(request):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        channel = data.get("channel", "online")  # online / offline
-        if channel not in ["online", "offline"]:
+        channel = data.get("channel", "both")  # online / offline
+        if channel not in ["online", "offline", "both"]:
             return Response(
-                {"error": "channel must be 'online' or 'offline'"},
+                {"error": "channel must be 'online' or 'offline' or 'both'"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -633,8 +705,25 @@ def commit_reservation(request):
         notes = data.get("notes")
         join_waitlist = data.get("joinWaitlist", False)
 
+        # Validate reservation date is not in the past
+        today = timezone.now().date()
+        reservation_date = reservation_time.date()
+        
+        if reservation_date < today:
+            return Response(
+                {
+                    "error": "Reservation date cannot be in the past",
+                    "reservationDate": reservation_date.isoformat(),
+                    "today": today.isoformat()
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        # Note: We don't restrict future dates here - if slots exist, allow the reservation
+        # The slot existence check will handle cases where slots haven't been generated
+
         slot_center = floor_to_slot(reservation_time)
-        window_start = slot_center - timedelta(hours=2)
+        window_start = slot_center - timedelta(hours=0)
         window_end = slot_center + timedelta(hours=2)
 
         affected_slots = []
@@ -656,25 +745,60 @@ def commit_reservation(request):
         # 2️⃣ Check ALL affected capacity slots and validate availability
         # If capacity is exceeded and joinWaitlist is True, we'll handle it differently
         capacity_exceeded = False
+        missing_slots = []
+        slot_ids = []  # Collect slot IDs for the reservation
+        
         for slot in affected_slots:
             slot_start_iso = slot.isoformat()
             
-            # Check capacity slot with channel="both"
-            capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax, maxPax').eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+            # Check capacity slot with channel="both" - also get the ID
+            capacity_slot = supabase.table('ecosuite_capacity_slot').select('id, usedPax, maxPax').eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
             
             if not capacity_slot.data:
-                raise Exception(f"CAPACITY_SLOT_NOT_FOUND: Slot at {slot_start_iso} does not exist")
+                missing_slots.append(slot_start_iso)
+                continue  # Skip to next slot if this one doesn't exist
             
             slot_data = capacity_slot.data[0]
+            slot_id = slot_data.get('id')
             current_used = slot_data.get('usedPax', 0)
             max_capacity = slot_data.get('maxPax', 0)
+            
+            # Collect slot ID (collect for all slots, even if capacity exceeded)
+            if slot_id:
+                slot_ids.append(slot_id)
             
             if current_used + pax > max_capacity:
                 if join_waitlist:
                     capacity_exceeded = True
-                    break  # Exit loop, will create waitlisted reservation
+                    # Continue collecting slot IDs for all affected slots even if capacity exceeded
+                    # This allows us to track which slots the waitlisted reservation is trying to use
                 else:
-                    raise Exception("CAPACITY_EXCEEDED")
+                    return Response(
+                        {
+                            "error": "CAPACITY_EXCEEDED",
+                            "message": f"Capacity exceeded for the requested time slot. Current: {current_used}/{max_capacity}, Requested: {pax}",
+                            "currentUsed": current_used,
+                            "maxCapacity": max_capacity,
+                            "requestedPax": pax,
+                            "slotStart": slot_start_iso,
+                            "suggestion": "Set joinWaitlist=true to join the waitlist"
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+        
+        # If any slots are missing, provide a detailed error
+        if missing_slots:
+            return Response(
+                {
+                    "error": "CAPACITY_SLOT_NOT_FOUND",
+                    "message": f"Capacity slots have not been generated for the requested time period. Please ensure slots are generated for the date range.",
+                    "missingSlots": missing_slots[:5],  # Show first 5 missing slots
+                    "totalMissingSlots": len(missing_slots),
+                    "reservationDateTime": reservation_date_time_str,
+                    "suggestion": "Run the slot generation endpoint for this brand to create capacity slots."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # 3️⃣ Update capacity slots (increment usedPax) only if capacity is available
         if not capacity_exceeded:
@@ -689,7 +813,6 @@ def commit_reservation(request):
                     # Update using Supabase update with increment
                     supabase.table('ecosuite_capacity_slot').update({
                         'usedPax': current_used + pax,
-                        'updatedAt': timezone.now().isoformat()
                     }).eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
 
         # 4️⃣ Create reservation using Supabase
@@ -710,6 +833,10 @@ def commit_reservation(request):
             'createdAt': now,
             'updatedAt': now
         }
+        
+        # Add slotIds if we have them
+        if slot_ids:
+            reservation_data['slotIds'] = slot_ids
         
         # Add optional fields if provided
         if customer_name:
@@ -741,25 +868,37 @@ def commit_reservation(request):
 
     except Exception as e:
         error_str = str(e)
-        if "CAPACITY" in error_str:
-            return Response(
-                {"status": "waitlisted", "reason": error_str},
-                status=status.HTTP_409_CONFLICT,
-            )
-        
-        if "SLOT_NOT_FOUND" in error_str or "CAPACITY_SLOT_NOT_FOUND" in error_str:
-            return Response(
-                {"error": error_str, "message": "Capacity slots have not been generated for this time period"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         import traceback
         error_details = {
             "error": error_str,
             "error_type": type(e).__name__
         }
+        
+        # Provide more detailed error messages
+        if "CAPACITY_EXCEEDED" in error_str:
+            return Response(
+                {
+                    "error": "CAPACITY_EXCEEDED",
+                    "message": "Capacity exceeded for the requested time period",
+                    "reason": error_str
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        
+        if "CAPACITY_SLOT_NOT_FOUND" in error_str or "SLOT_NOT_FOUND" in error_str:
+            return Response(
+                {
+                    "error": "CAPACITY_SLOT_NOT_FOUND",
+                    "message": "Capacity slots have not been generated for this time period",
+                    "reason": error_str,
+                    "suggestion": "Run the slot generation endpoint for this brand to create capacity slots"
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
         if os.getenv('DEBUG', 'False').lower() == 'true':
             error_details["traceback"] = traceback.format_exc()
+        
         return Response(
             error_details,
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -4129,4 +4268,5 @@ def format_reservation_datetime(reservation_datetime):
         return dt.strftime('%A, %B %d, %Y at %I:%M %p')
     except:
         return reservation_datetime
+
 
