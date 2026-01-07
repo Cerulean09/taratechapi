@@ -16,6 +16,7 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
+from . import views
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -25,5 +26,7 @@ urlpatterns = [
     path('api/chongqinghotpot/', include('chongqinghotpot.urls')),
     path('api/ecosuite/', include('ecosuite.urls')),
     path('api/koalaplus/', include('koalaplus.urls')),
+    path('healthz', views.healthz, name='healthz'),
+    
      
 ]

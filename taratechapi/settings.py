@@ -35,6 +35,9 @@ DEBUG = True
 ALLOWED_HOSTS = [
     'taratechid.pythonanywhere.com',
     'taratechapi.fly.dev',
+    "127.0.0.1",
+    "172.19.54.162",
+    "*"
 
 ]
 

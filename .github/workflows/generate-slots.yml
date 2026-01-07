@@ -1,0 +1,22 @@
+name: Generate Capacity Slots
+
+on:
+  schedule:
+    - cron: "0 * * * *" # every hour
+  workflow_dispatch:
+
+jobs:
+  generate-slots:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Call slot generation endpoint
+        run: |
+          curl -X POST https://taratechapi.fly.dev/api/ecosuite/slots/generate \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.API_TOKEN }}" \
+            -d '{
+              "outletId": "ILY79IOQG6",
+              "totalCapacity": 16,
+              "onlineCapacity": 16
+            }'

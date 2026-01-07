@@ -10,7 +10,8 @@ urlpatterns = [
     path('profile/', views.profile),
     path('get-all-users/', views.get_all_users, name='get_all_users'),
     path('update-user/<str:user_id>/', views.update_user, name='update_user'),
-    
+    path('save-analytics-data/', views.save_analytics_data, name='save_analytics_data'),
+
     # Brand Management Endpoints
     path('get-all-brands/', views.get_all_brands, name='get_all_brands'),
     path('create-brand/', views.create_brand, name='create_brand'),
@@ -40,7 +41,9 @@ urlpatterns = [
     path('send-reservation-reminder-for-5pax-and-above-2day-before-reservation-date/', views.send_reservation_reminder_for_5pax_and_above_2day_before_reservation_date, name='send_reservation_reminder_for_5pax_and_above_2day_before_reservation_date'),
     path('send-cancel-notification-for-confirmed-reservations-1day-before-reservation-date/', views.send_cancel_notification_for_confirmed_reservations_1day_before_reservation_date, name='send_cancel_notification_for_confirmed_reservations_1day_before_reservation_date'),
     path('check-waitlisted-reservations-with-confirmedExpiryDateTime-expired/', views.check_waitlisted_reservations_with_confirmedExpiryDateTime_expired, name='check_waitlisted_reservations_with_confirmedExpiryDateTime_expired'),
-
+    path('reservations/commit/', views.commit_reservations, name='commit_reservations'),
+    path('slots/generate/', views.generate_capacity_slots, name='generate_capacity_slots'),
+    
     # Pivot Integration
     path('pivot/create-payment/', views.pivot_create_payment, name='pivot_create_payment'),
     path('pivot/check-payment/<str:reservation_id>/', views.pivot_check_payment, name='pivot_check_payment'),
@@ -52,5 +55,8 @@ urlpatterns = [
     path('esb/get-branch-list/', views.get_branch_list, name='get_branch_list'),
     path('esb/get-branch-data/', views.get_branch_data, name='get_branch_data'),
     path('esb/reservation-to-esb-order/', views.reservation_to_esb_order, name='reservation_to_esb_order'),
-
+    path('esb/get-menu-list/', views.get_menu_list, name='get_menu_list'),
+    path('esb/get-tables-list/', views.get_tables_list, name='get_tables_list'),
+    path('esb/get-visit-purpose/', views.get_visit_purpose, name='get_visit_purpose'),
+    path('esb/submit-reservation-transaction/', views.submit_reservation_transaction, name='submit_reservation_transaction'),
 ]

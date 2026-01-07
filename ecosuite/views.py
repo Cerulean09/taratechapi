@@ -12,9 +12,16 @@ import os
 import uuid
 import json
 import re
+import traceback
 from datetime import datetime, timedelta
 from django.utils import timezone
 import requests
+from datetime import timedelta
+from django.db import connection, transaction
+from django.utils import timezone
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework import status
 
 def create_esb_header(request, additional_headers=None):
     headers = {
@@ -31,16 +38,79 @@ def get_branch_list(request):
         "data": "data"
     }, status=status.HTTP_200_OK)
 
+@api_view(["GET"])
+def get_menu_list(request):
+    header = create_esb_header(request, additional_headers={"Data-Company":"SAE","Data-Branch": "SUPG"})
+    visitPurposeID = "64"
+    fetchPackagesExtras = False
+    url = os.getenv("ESB_URL_STAGING_INT", "").rstrip("/") + f"/qsv1/menu/{visitPurposeID}?fetchPackagesExtras={fetchPackagesExtras}"
+    esb_resp = requests.get(url, headers=header, timeout=20)
+    if esb_resp.status_code != 200:
+        return Response({
+            "message": "Failed to fetch menu list",
+            "data": esb_resp.text
+        }, status=status.HTTP_400_BAD_REQUEST)
+    return Response(esb_resp.json(), status=status.HTTP_200_OK)
+
+@api_view(["POST"])
+def submit_reservation_transaction(request):
+    header = create_esb_header(request, additional_headers={"Data-Company":"SAE","Data-Branch": "SUPG"})
+    request_body = {
+        
+    "title": request.data.get('title'),
+    "customerName": request.data.get('customerName'),
+    "email": request.data.get('email'),
+    "phoneNumber": request.data.get('phoneNumber'),
+    "paxTotal": request.data.get('paxTotal'),
+    "reservationDate": request.data.get('reservationDate'),
+    "reservationTime": request.data.get('reservationTime'),
+    "purpose": '3' if request.data.get('isDineIn') else '1',
+    "notes": request.data.get('notes')
+
+}
+    url = os.getenv("ESB_URL_STAGING_INT", "").rstrip("/") + "/qsv1/reservation/transaction"
+    esb_resp = requests.post(url, headers=header, timeout=20, json=request_body)
+    if esb_resp.status_code != 200:
+        return Response({
+            "message": "Failed to submit reservation transaction",
+            "data": esb_resp.text
+        }, status=status.HTTP_400_BAD_REQUEST)
+    return Response(esb_resp.json(), status=status.HTTP_200_OK)
+
+@api_view(["GET"])
+def get_tables_list(request):
+    header = create_esb_header(request, additional_headers={"Data-Company":"SAE","Data-Branch": "SUPG"})
+    url = os.getenv("ESB_URL_STAGING_INT", "").rstrip("/") + "/qsv1/reservation/table-section?reservationDate=2025-01-05&reservationTime=15:00"
+    esb_resp = requests.get(url, headers=header, timeout=20)
+    if esb_resp.status_code != 200:
+        return Response({
+            "message": "Failed to fetch tables list",
+            "data": esb_resp.text
+        }, status=status.HTTP_400_BAD_REQUEST)
+    return Response(esb_resp.json(), status=status.HTTP_200_OK)
+
+@api_view(["GET"])
+def get_visit_purpose(request):
+    header = create_esb_header(request)
+    url ="https://stg7.esb.co.id/api-fnb-backend-int/web" + "/extv1/visit-purpose"
+    esb_resp = requests.get(url, headers=header, timeout=20)
+    if esb_resp.status_code != 200:
+        return Response({
+            "message": "Failed to fetch visit purpose",
+            "data": esb_resp.text
+        }, status=status.HTTP_400_BAD_REQUEST)
+    return Response(esb_resp.json(), status=status.HTTP_200_OK)
+
+
+
 @api_view(["POST"])
 def reservation_to_esb_order(request):
-
     headers = create_esb_header(request, additional_headers={"Data-Company":"SAE","Data-Branch": "SUPG"})
-
     url = os.getenv("ESB_URL_STAGING_INT", "").rstrip("/") + "/qsv1/order"
 
     request_body =   {
         "orderType": "custom",
-        "orderTypeName": "reservation by tara tech",
+        "orderTypeName": "Tara Tech Reservation",
         "fullName": request.data.get('customerName'),
         "email": request.data.get('customerEmail'),
         "phoneNumber": request.data.get('customerPhone'),
@@ -63,14 +133,14 @@ def reservation_to_esb_order(request):
         "promotionCode": "",
         "vouchers": [],
         "paymentMethodID": "ovo",
-        "amount": 0,
+        "amount": 35000,
         "returnUrl": "https://int-eso.esb.co.id/payment-notification",
         "refApp": None,
         "userToken": "",
         "paymentPhoneNumber": request.data.get('customerPhone'),
         "tableName": request.data.get('tableName'),
         "tokenID": "",
-        "authenticationID": "",
+        "authenticationID": "", 
         "cvn": "",
         "bin": "",
         "customerNotes": f"Reservation ID : {request.data.get('reservationId')}",
@@ -226,6 +296,69 @@ def index(request):
 def hello(request):
     return JsonResponse({"message": "Hello from Ecosuite!"})
 
+SLOT_MINUTES = 30
+DAYS_AHEAD = 30
+
+
+@api_view(["POST"])
+def generate_capacity_slots(request):
+    outlet_id = request.data["outletId"]
+    total_capacity = request.data["totalCapacity"]
+    online_capacity = request.data["onlineCapacity"]
+
+    today = timezone.now().date()
+    end_date = today + timedelta(days=DAYS_AHEAD)
+
+    try:
+        with transaction.atomic():
+            with connection.cursor() as cursor:
+                current_date = today
+
+                while current_date <= end_date:
+                    # Example: 10:00–22:00 (replace with real operating hours)
+                    start_time = timezone.make_aware(
+                        timezone.datetime.combine(current_date, timezone.datetime.min.time())
+                    ).replace(hour=10)
+
+                    end_time = start_time.replace(hour=22)
+
+                    current_slot = start_time
+                    while current_slot < end_time:
+                        # TOTAL capacity
+                        cursor.execute(
+                            """
+                            INSERT INTO capacity_slot (
+                                outlet_id, slot_start, channel, max_pax
+                            )
+                            VALUES (%s,%s,'all',%s)
+                            ON CONFLICT (outlet_id, slot_start, channel) DO NOTHING
+                            """,
+                            [outlet_id, current_slot, total_capacity],
+                        )
+
+                        # ONLINE capacity
+                        cursor.execute(
+                            """
+                            INSERT INTO capacity_slot (
+                                outlet_id, slot_start, channel, max_pax
+                            )
+                            VALUES (%s,%s,'online',%s)
+                            ON CONFLICT (outlet_id, slot_start, channel) DO NOTHING
+                            """,
+                            [outlet_id, current_slot, online_capacity],
+                        )
+
+                        current_slot += timedelta(minutes=SLOT_MINUTES)
+
+                    current_date += timedelta(days=1)
+
+        return Response({"status": "slots_generated"}, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        return Response(
+            {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def register(request):
@@ -242,6 +375,250 @@ def register(request):
 
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+def round_up_even(n: int) -> int:
+    return n if n % 2 == 0 else n + 1
+
+
+def floor_to_slot(dt):
+    minute = (dt.minute // 30) * 30
+    return dt.replace(minute=minute, second=0, microsecond=0)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def commit_reservation(request):
+    """
+    Atomic reservation commit endpoint.
+    """
+    data = request.data
+
+    outlet_id = data["outletId"]
+    reservation_time = timezone.make_aware(
+        timezone.datetime.fromisoformat(data["reservationDateTime"])
+    )
+    pax = round_up_even(int(data["numberOfGuests"]))
+    channel = data.get("channel", "online")  # online / offline
+    idempotency_key = data.get("idempotencyKey")
+
+    if not idempotency_key:
+        return Response(
+            {"message": "idempotencyKey is required"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    slot_center = floor_to_slot(reservation_time)
+    window_start = slot_center - timedelta(hours=2)
+    window_end = slot_center + timedelta(hours=2)
+
+    affected_slots = []
+    current = window_start
+    while current <= window_end:
+        affected_slots.append(current)
+        current += timedelta(minutes=30)
+
+    try:
+        with transaction.atomic():
+            with connection.cursor() as cursor:
+
+                # 1️⃣ Idempotency check
+                cursor.execute(
+                    """
+                    SELECT id FROM ecosuite_reservation
+                    WHERE idempotency_key = %s
+                    """,
+                    [idempotency_key],
+                )
+                existing = cursor.fetchone()
+                if existing:
+                    return Response(
+                        {"reservationId": existing[0], "status": "already_confirmed"},
+                        status=status.HTTP_200_OK,
+                    )
+
+                # 2️⃣ Lock ALL affected capacity rows
+                for slot in affected_slots:
+                    # TOTAL CAPACITY
+                    cursor.execute(
+                        """
+                        SELECT used_pax, max_pax
+                        FROM capacity_slot
+                        WHERE outlet_id = %s
+                          AND slot_start = %s
+                          AND channel = 'all'
+                        FOR UPDATE
+                        """,
+                        [outlet_id, slot],
+                    )
+                    row = cursor.fetchone()
+                    if not row or row[0] + pax > row[1]:
+                        raise Exception("TOTAL_CAPACITY_EXCEEDED")
+
+                    # ONLINE CAPACITY (only if online booking)
+                    if channel == "online":
+                        cursor.execute(
+                            """
+                            SELECT used_pax, max_pax
+                            FROM capacity_slot
+                            WHERE outlet_id = %s
+                              AND slot_start = %s
+                              AND channel = 'online'
+                            FOR UPDATE
+                            """,
+                            [outlet_id, slot],
+                        )
+                        row = cursor.fetchone()
+                        if not row or row[0] + pax > row[1]:
+                            raise Exception("ONLINE_CAPACITY_EXCEEDED")
+
+                # 3️⃣ Commit capacity increments
+                for slot in affected_slots:
+                    cursor.execute(
+                        """
+                        UPDATE capacity_slot
+                        SET used_pax = used_pax + %s,
+                            updated_at = now()
+                        WHERE outlet_id = %s
+                          AND slot_start = %s
+                          AND channel = 'all'
+                        """,
+                        [pax, outlet_id, slot],
+                    )
+
+                    if channel == "online":
+                        cursor.execute(
+                            """
+                            UPDATE capacity_slot
+                            SET used_pax = used_pax + %s,
+                                updated_at = now()
+                            WHERE outlet_id = %s
+                              AND slot_start = %s
+                              AND channel = 'online'
+                            """,
+                            [pax, outlet_id, slot],
+                        )
+
+                # 4️⃣ Create reservation
+                reservation_id = str(uuid.uuid4())
+                cursor.execute(
+                    """
+                    INSERT INTO ecosuite_reservation (
+                        id,
+                        outlet_id,
+                        reservation_datetime,
+                        number_of_guests,
+                        status,
+                        created_by,
+                        idempotency_key,
+                        created_at,
+                        updated_at
+                    ) VALUES (%s,%s,%s,%s,'confirmed',%s,%s,now(),now())
+                    """,
+                    [
+                        reservation_id,
+                        outlet_id,
+                        reservation_time,
+                        pax,
+                        channel,
+                        idempotency_key,
+                    ],
+                )
+
+                return Response(
+                    {
+                        "status": "confirmed",
+                        "reservationId": reservation_id,
+                        "pax": pax,
+                    },
+                    status=status.HTTP_201_CREATED,
+                )
+
+    except Exception as e:
+        if "CAPACITY" in str(e):
+            return Response(
+                {"status": "waitlisted", "reason": str(e)},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        return Response(
+            {"message": "Internal error", "error": str(e)},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def save_analytics_data(request):
+    """Save analytics data to Supabase.
+    Expected fields in request body:
+    - type
+    - device
+    - timestamp
+    - tag
+    - brandId
+    Note: id is auto-generated as UUID v4
+    """
+    supabase = create_supabase_client()
+    try:
+        # Extract and validate required fields
+        analytics_type = request.data.get('type')
+        device = request.data.get('device')
+        timestamp = request.data.get('timestamp')
+        tag = request.data.get('tag')
+        brand_id = request.data.get('brandId')
+        
+        # Validate required fields
+        if not analytics_type:
+            return Response({
+                "error": "Missing required field: type"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not device:
+            return Response({
+                "error": "Missing required field: device"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not timestamp:
+            return Response({
+                "error": "Missing required field: timestamp"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not tag:
+            return Response({
+                "error": "Missing required field: tag"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not brand_id:
+            return Response({
+                "error": "Missing required field: brandId"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Prepare data for insertion (id is auto-generated)
+        analytics_data = {
+            'id': str(uuid.uuid4()),
+            'type': analytics_type,
+            'device': device,
+            'timestamp': timestamp,
+            'tag': tag,
+            'brandId': brand_id
+        }
+        
+        # Insert into Supabase
+        response = supabase.table('ecosuite_analytics').insert(analytics_data).execute()
+        
+        return Response({
+            "message": "Analytics data saved successfully",
+            "data": response.data
+        }, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        error_details = {
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+        # Include traceback for debugging (remove in production if needed)
+        if os.getenv('DEBUG', 'False').lower() == 'true':
+            error_details["traceback"] = traceback.format_exc()
+        return Response(error_details, status=status.HTTP_400_BAD_REQUEST)
 
 @api_view(['POST'])
 @permission_classes([AllowAny])
