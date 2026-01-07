@@ -466,8 +466,7 @@ def generate_capacity_slots(request):
                 current_date += timedelta(days=1)
             
             outlet_results.append({
-                'outletId': outlet_id,
-                'outletName': outlet_name,
+                'brandId': brand_id,
                 'slotsCreated': outlet_slots_created,
                 'slotsSkipped': outlet_slots_skipped
             })
