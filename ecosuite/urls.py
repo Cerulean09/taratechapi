@@ -41,7 +41,7 @@ urlpatterns = [
     path('send-reservation-reminder-for-5pax-and-above-2day-before-reservation-date/', views.send_reservation_reminder_for_5pax_and_above_2day_before_reservation_date, name='send_reservation_reminder_for_5pax_and_above_2day_before_reservation_date'),
     path('send-cancel-notification-for-confirmed-reservations-1day-before-reservation-date/', views.send_cancel_notification_for_confirmed_reservations_1day_before_reservation_date, name='send_cancel_notification_for_confirmed_reservations_1day_before_reservation_date'),
     path('check-waitlisted-reservations-with-confirmedExpiryDateTime-expired/', views.check_waitlisted_reservations_with_confirmedExpiryDateTime_expired, name='check_waitlisted_reservations_with_confirmedExpiryDateTime_expired'),
-    path('reservations/commit/', views.commit_reservations, name='commit_reservations'),
+    path('reservations/commit/', views.commit_reservation, name='commit_reservations'),
     path('slots/generate/', views.generate_capacity_slots, name='generate_capacity_slots'),
     
     # Pivot Integration

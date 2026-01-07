@@ -301,62 +301,150 @@ DAYS_AHEAD = 30
 
 
 @api_view(["POST"])
+@permission_classes([AllowAny])
 def generate_capacity_slots(request):
-    outlet_id = request.data["outletId"]
-    total_capacity = request.data["totalCapacity"]
-    online_capacity = request.data["onlineCapacity"]
-
-    today = timezone.now().date()
-    end_date = today + timedelta(days=DAYS_AHEAD)
-
+    """Generate capacity slots for an outlet.
+    Expected fields in request body:
+    - outletId: The outlet identifier
+    - totalCapacity: Total capacity for the outlet
+    - onlineCapacity: Online booking capacity
+    """
     try:
-        with transaction.atomic():
-            with connection.cursor() as cursor:
-                current_date = today
+        # Validate required fields
+        outlet_id = request.data.get("outletId")
+        total_capacity = request.data.get("totalCapacity")
+        online_capacity = request.data.get("onlineCapacity")
+        
+        if not outlet_id:
+            return Response(
+                {"error": "Missing required field: outletId"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if total_capacity is None:
+            return Response(
+                {"error": "Missing required field: totalCapacity"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if online_capacity is None:
+            return Response(
+                {"error": "Missing required field: onlineCapacity"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate capacity values
+        try:
+            total_capacity = int(total_capacity)
+            online_capacity = int(online_capacity)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "totalCapacity and onlineCapacity must be integers"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if total_capacity < 0 or online_capacity < 0:
+            return Response(
+                {"error": "Capacity values must be non-negative"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if online_capacity > total_capacity:
+            return Response(
+                {"error": "onlineCapacity cannot exceed totalCapacity"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
-                while current_date <= end_date:
-                    # Example: 10:00–22:00 (replace with real operating hours)
-                    start_time = timezone.make_aware(
-                        timezone.datetime.combine(current_date, timezone.datetime.min.time())
-                    ).replace(hour=10)
+        today = timezone.now().date()
+        end_date = today + timedelta(days=DAYS_AHEAD)
+        
+        slots_created = 0
+        slots_skipped = 0
+        
+        supabase = create_supabase_client()
+        current_date = today
 
-                    end_time = start_time.replace(hour=22)
+        while current_date <= end_date:
+            # Create start time at 10:00 AM for the current date
+            start_time = timezone.make_aware(
+                datetime.combine(current_date, datetime.min.time())
+            ).replace(hour=10, minute=0, second=0, microsecond=0)
 
-                    current_slot = start_time
-                    while current_slot < end_time:
-                        # TOTAL capacity
-                        cursor.execute(
-                            """
-                            INSERT INTO capacity_slot (
-                                outlet_id, slot_start, channel, max_pax
-                            )
-                            VALUES (%s,%s,'all',%s)
-                            ON CONFLICT (outlet_id, slot_start, channel) DO NOTHING
-                            """,
-                            [outlet_id, current_slot, total_capacity],
-                        )
+            # End time at 10:00 PM (22:00)
+            end_time = start_time.replace(hour=22, minute=0, second=0, microsecond=0)
 
-                        # ONLINE capacity
-                        cursor.execute(
-                            """
-                            INSERT INTO capacity_slot (
-                                outlet_id, slot_start, channel, max_pax
-                            )
-                            VALUES (%s,%s,'online',%s)
-                            ON CONFLICT (outlet_id, slot_start, channel) DO NOTHING
-                            """,
-                            [outlet_id, current_slot, online_capacity],
-                        )
+            current_slot = start_time
+            while current_slot < end_time:
+                slot_start_iso = current_slot.isoformat()
+                
+                # TOTAL capacity slot - use upsert
+                total_slot_data = {
+                    'outletId': outlet_id,
+                    'slotStart': slot_start_iso,
+                    'channel': 'all',
+                    'maxPax': total_capacity,
+                    'usedPax': 0
+                }
+                
+                # Check if slot already exists
+                existing_total = supabase.table('ecosuite_capacity_slot').select('id').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'all').execute()
+                
+                if not existing_total.data:
+                    supabase.table('ecosuite_capacity_slot').insert(total_slot_data).execute()
+                    slots_created += 1
+                else:
+                    slots_skipped += 1
 
-                        current_slot += timedelta(minutes=SLOT_MINUTES)
+                # ONLINE capacity slot - use upsert
+                online_slot_data = {
+                    'outletId': outlet_id,
+                    'slotStart': slot_start_iso,
+                    'channel': 'online',
+                    'maxPax': online_capacity,
+                    'usedPax': 0
+                }
+                
+                # Check if slot already exists
+                existing_online = supabase.table('ecosuite_capacity_slot').select('id').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'online').execute()
+                
+                if not existing_online.data:
+                    supabase.table('ecosuite_capacity_slot').insert(online_slot_data).execute()
+                    slots_created += 1
+                else:
+                    slots_skipped += 1
 
-                    current_date += timedelta(days=1)
+                current_slot += timedelta(minutes=SLOT_MINUTES)
 
-        return Response({"status": "slots_generated"}, status=status.HTTP_200_OK)
+            current_date += timedelta(days=1)
 
-    except Exception as e:
+        return Response({
+            "status": "slots_generated",
+            "outletId": outlet_id,
+            "dateRange": {
+                "start": today.isoformat(),
+                "end": end_date.isoformat()
+            },
+            "slotsCreated": slots_created,
+            "slotsSkipped": slots_skipped,
+            "totalSlots": slots_created + slots_skipped
+        }, status=status.HTTP_200_OK)
+
+    except KeyError as e:
         return Response(
-            {"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            {"error": f"Missing required field: {str(e)}"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    except Exception as e:
+        import traceback
+        error_details = {
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+        if os.getenv('DEBUG', 'False').lower() == 'true':
+            error_details["traceback"] = traceback.format_exc()
+        return Response(
+            error_details,
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
 @api_view(['POST'])
@@ -390,158 +478,236 @@ def floor_to_slot(dt):
 def commit_reservation(request):
     """
     Atomic reservation commit endpoint.
+    Expected fields in request body:
+    - outletId: The outlet identifier
+    - reservationDateTime: ISO format datetime string
+    - numberOfGuests: Number of guests (will be rounded up to even number)
+    - idempotencyKey: Unique key for idempotency (required)
+    - channel: 'online' or 'offline' (defaults to 'online')
+    - customerName: Customer name (optional but recommended)
+    - customerPhone: Customer phone number (optional but recommended)
+    - brandId: Brand identifier (optional but recommended)
     """
-    data = request.data
-
-    outlet_id = data["outletId"]
-    reservation_time = timezone.make_aware(
-        timezone.datetime.fromisoformat(data["reservationDateTime"])
-    )
-    pax = round_up_even(int(data["numberOfGuests"]))
-    channel = data.get("channel", "online")  # online / offline
-    idempotency_key = data.get("idempotencyKey")
-
-    if not idempotency_key:
-        return Response(
-            {"message": "idempotencyKey is required"},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    slot_center = floor_to_slot(reservation_time)
-    window_start = slot_center - timedelta(hours=2)
-    window_end = slot_center + timedelta(hours=2)
-
-    affected_slots = []
-    current = window_start
-    while current <= window_end:
-        affected_slots.append(current)
-        current += timedelta(minutes=30)
-
     try:
-        with transaction.atomic():
-            with connection.cursor() as cursor:
+        data = request.data
 
-                # 1️⃣ Idempotency check
-                cursor.execute(
-                    """
-                    SELECT id FROM ecosuite_reservation
-                    WHERE idempotency_key = %s
-                    """,
-                    [idempotency_key],
-                )
-                existing = cursor.fetchone()
-                if existing:
-                    return Response(
-                        {"reservationId": existing[0], "status": "already_confirmed"},
-                        status=status.HTTP_200_OK,
-                    )
-
-                # 2️⃣ Lock ALL affected capacity rows
-                for slot in affected_slots:
-                    # TOTAL CAPACITY
-                    cursor.execute(
-                        """
-                        SELECT used_pax, max_pax
-                        FROM capacity_slot
-                        WHERE outlet_id = %s
-                          AND slot_start = %s
-                          AND channel = 'all'
-                        FOR UPDATE
-                        """,
-                        [outlet_id, slot],
-                    )
-                    row = cursor.fetchone()
-                    if not row or row[0] + pax > row[1]:
-                        raise Exception("TOTAL_CAPACITY_EXCEEDED")
-
-                    # ONLINE CAPACITY (only if online booking)
-                    if channel == "online":
-                        cursor.execute(
-                            """
-                            SELECT used_pax, max_pax
-                            FROM capacity_slot
-                            WHERE outlet_id = %s
-                              AND slot_start = %s
-                              AND channel = 'online'
-                            FOR UPDATE
-                            """,
-                            [outlet_id, slot],
-                        )
-                        row = cursor.fetchone()
-                        if not row or row[0] + pax > row[1]:
-                            raise Exception("ONLINE_CAPACITY_EXCEEDED")
-
-                # 3️⃣ Commit capacity increments
-                for slot in affected_slots:
-                    cursor.execute(
-                        """
-                        UPDATE capacity_slot
-                        SET used_pax = used_pax + %s,
-                            updated_at = now()
-                        WHERE outlet_id = %s
-                          AND slot_start = %s
-                          AND channel = 'all'
-                        """,
-                        [pax, outlet_id, slot],
-                    )
-
-                    if channel == "online":
-                        cursor.execute(
-                            """
-                            UPDATE capacity_slot
-                            SET used_pax = used_pax + %s,
-                                updated_at = now()
-                            WHERE outlet_id = %s
-                              AND slot_start = %s
-                              AND channel = 'online'
-                            """,
-                            [pax, outlet_id, slot],
-                        )
-
-                # 4️⃣ Create reservation
-                reservation_id = str(uuid.uuid4())
-                cursor.execute(
-                    """
-                    INSERT INTO ecosuite_reservation (
-                        id,
-                        outlet_id,
-                        reservation_datetime,
-                        number_of_guests,
-                        status,
-                        created_by,
-                        idempotency_key,
-                        created_at,
-                        updated_at
-                    ) VALUES (%s,%s,%s,%s,'confirmed',%s,%s,now(),now())
-                    """,
-                    [
-                        reservation_id,
-                        outlet_id,
-                        reservation_time,
-                        pax,
-                        channel,
-                        idempotency_key,
-                    ],
-                )
-
-                return Response(
-                    {
-                        "status": "confirmed",
-                        "reservationId": reservation_id,
-                        "pax": pax,
-                    },
-                    status=status.HTTP_201_CREATED,
-                )
-
-    except Exception as e:
-        if "CAPACITY" in str(e):
+        # Validate required fields
+        outlet_id = data.get("outletId")
+        reservation_date_time_str = data.get("reservationDateTime")
+        number_of_guests = data.get("numberOfGuests")
+        idempotency_key = data.get("idempotencyKey")
+        
+        if not outlet_id:
             return Response(
-                {"status": "waitlisted", "reason": str(e)},
-                status=status.HTTP_409_CONFLICT,
+                {"error": "Missing required field: outletId"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        if not reservation_date_time_str:
+            return Response(
+                {"error": "Missing required field: reservationDateTime"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        if number_of_guests is None:
+            return Response(
+                {"error": "Missing required field: numberOfGuests"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        if not idempotency_key:
+            return Response(
+                {"error": "Missing required field: idempotencyKey"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Parse and validate datetime
+        try:
+            # Handle ISO format with or without timezone
+            if 'Z' in reservation_date_time_str:
+                reservation_time = timezone.make_aware(
+                    datetime.fromisoformat(reservation_date_time_str.replace('Z', '+00:00'))
+                )
+            elif '+' in reservation_date_time_str or reservation_date_time_str.count('-') > 2:
+                reservation_time = timezone.make_aware(
+                    datetime.fromisoformat(reservation_date_time_str)
+                )
+            else:
+                # Assume local timezone if no timezone info
+                reservation_time = timezone.make_aware(
+                    datetime.fromisoformat(reservation_date_time_str)
+                )
+        except (ValueError, TypeError) as e:
+            return Response(
+                {"error": f"Invalid reservationDateTime format: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Validate and process number of guests
+        try:
+            pax = round_up_even(int(number_of_guests))
+            if pax <= 0:
+                return Response(
+                    {"error": "numberOfGuests must be greater than 0"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "numberOfGuests must be a valid number"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        channel = data.get("channel", "online")  # online / offline
+        if channel not in ["online", "offline"]:
+            return Response(
+                {"error": "channel must be 'online' or 'offline'"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Optional fields
+        customer_name = data.get("customerName")
+        customer_phone = data.get("customerPhone")
+        brand_id = data.get("brandId")
+
+        slot_center = floor_to_slot(reservation_time)
+        window_start = slot_center - timedelta(hours=2)
+        window_end = slot_center + timedelta(hours=2)
+
+        affected_slots = []
+        current = window_start
+        while current <= window_end:
+            affected_slots.append(current)
+            current += timedelta(minutes=30)
+
+        supabase = create_supabase_client()
+        
+        # 1️⃣ Idempotency check
+        existing_reservation = supabase.table('ecosuite_reservations').select('id').eq('idempotencyKey', idempotency_key).execute()
+        if existing_reservation.data:
+            return Response(
+                {"reservationId": existing_reservation.data[0]['id'], "status": "already_confirmed"},
+                status=status.HTTP_200_OK,
+            )
+
+        # 2️⃣ Check ALL affected capacity slots and validate availability
+        for slot in affected_slots:
+            slot_start_iso = slot.isoformat()
+            
+            # TOTAL CAPACITY check
+            total_capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax, maxPax').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'all').execute()
+            
+            if not total_capacity_slot.data:
+                raise Exception(f"TOTAL_CAPACITY_SLOT_NOT_FOUND: Slot at {slot_start_iso} does not exist")
+            
+            slot_data = total_capacity_slot.data[0]
+            current_used = slot_data.get('usedPax', 0)
+            max_capacity = slot_data.get('maxPax', 0)
+            
+            if current_used + pax > max_capacity:
+                raise Exception("TOTAL_CAPACITY_EXCEEDED")
+
+            # ONLINE CAPACITY check (only if online booking)
+            if channel == "online":
+                online_capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax, maxPax').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'online').execute()
+                
+                if not online_capacity_slot.data:
+                    raise Exception(f"ONLINE_CAPACITY_SLOT_NOT_FOUND: Slot at {slot_start_iso} does not exist")
+                
+                online_slot_data = online_capacity_slot.data[0]
+                online_current_used = online_slot_data.get('usedPax', 0)
+                online_max_capacity = online_slot_data.get('maxPax', 0)
+                
+                if online_current_used + pax > online_max_capacity:
+                    raise Exception("ONLINE_CAPACITY_EXCEEDED")
+
+        # 3️⃣ Update capacity slots (increment usedPax)
+        for slot in affected_slots:
+            slot_start_iso = slot.isoformat()
+            
+            # Get current values for atomic update
+            total_slot = supabase.table('ecosuite_capacity_slot').select('usedPax').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'all').execute()
+            if total_slot.data:
+                current_used = total_slot.data[0].get('usedPax', 0)
+                # Update using Supabase update with increment
+                supabase.table('ecosuite_capacity_slot').update({
+                    'usedPax': current_used + pax,
+                    'updatedAt': timezone.now().isoformat()
+                }).eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'all').execute()
+
+            if channel == "online":
+                online_slot = supabase.table('ecosuite_capacity_slot').select('usedPax').eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'online').execute()
+                if online_slot.data:
+                    online_current_used = online_slot.data[0].get('usedPax', 0)
+                    supabase.table('ecosuite_capacity_slot').update({
+                        'usedPax': online_current_used + pax,
+                        'updatedAt': timezone.now().isoformat()
+                    }).eq('outletId', outlet_id).eq('slotStart', slot_start_iso).eq('channel', 'online').execute()
+
+        # 4️⃣ Create reservation using Supabase upsert
+        reservation_id = str(uuid.uuid4())
+        now = timezone.now().isoformat()
+        
+        reservation_data = {
+            'id': reservation_id,
+            'outletId': outlet_id,
+            'reservationDateTime': reservation_time.isoformat(),
+            'numberOfGuests': pax,
+            'status': 'confirmed',
+            'idempotencyKey': idempotency_key,
+            'createdAt': now,
+            'updatedAt': now
+        }
+        
+        # Add optional fields if provided
+        if customer_name:
+            reservation_data['customerName'] = customer_name
+        if customer_phone:
+            reservation_data['customerPhone'] = customer_phone
+        if brand_id:
+            reservation_data['brandId'] = brand_id
+        
+        # Store channel in createdBy field (repurposing the field)
+        reservation_data['createdBy'] = channel
+        
+        # Insert reservation
+        response = supabase.table('ecosuite_reservations').insert(reservation_data).execute()
+        
+        if not response.data:
+            raise Exception("Failed to create reservation")
+
         return Response(
-            {"message": "Internal error", "error": str(e)},
+            {
+                "status": "confirmed",
+                "reservationId": reservation_id,
+                "pax": pax,
+                "channel": channel,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    except Exception as e:
+        error_str = str(e)
+        if "CAPACITY" in error_str:
+            return Response(
+                {"status": "waitlisted", "reason": error_str},
+                status=status.HTTP_409_CONFLICT,
+            )
+        
+        if "SLOT_NOT_FOUND" in error_str:
+            return Response(
+                {"error": error_str, "message": "Capacity slots have not been generated for this time period"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        import traceback
+        error_details = {
+            "error": error_str,
+            "error_type": type(e).__name__
+        }
+        if os.getenv('DEBUG', 'False').lower() == 'true':
+            error_details["traceback"] = traceback.format_exc()
+        return Response(
+            error_details,
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
