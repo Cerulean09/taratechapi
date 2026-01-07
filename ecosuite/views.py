@@ -533,23 +533,32 @@ def commit_reservation(request):
     """
     Atomic reservation commit endpoint.
     Expected fields in request body:
-    - outletId: The outlet identifier
-    - reservationDateTime: ISO format datetime string
-    - numberOfGuests: Number of guests (will be rounded up to even number)
+    - brandId: Brand identifier (required)
+    - outletId: The outlet identifier (required)
+    - reservationDateTime: ISO format datetime string (required)
+    - numberOfGuests: Number of guests (will be rounded up to even number) (required)
     - idempotencyKey: Unique key for idempotency (required)
     - channel: 'online' or 'offline' (defaults to 'online')
-    - customerName: Customer name (optional but recommended)
-    - customerPhone: Customer phone number (optional but recommended)
-    - brandId: Brand identifier (optional but recommended)
+    - customerName: Customer name (optional)
+    - customerPhone: Customer phone number (optional)
+    - notes: Reservation notes (optional)
+    - joinWaitlist: Boolean flag for waitlist (optional)
     """
     try:
         data = request.data
 
         # Validate required fields
+        brand_id = data.get("brandId")
         outlet_id = data.get("outletId")
         reservation_date_time_str = data.get("reservationDateTime")
         number_of_guests = data.get("numberOfGuests")
         idempotency_key = data.get("idempotencyKey")
+        
+        if not brand_id:
+            return Response(
+                {"error": "Missing required field: brandId"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         
         if not outlet_id:
             return Response(
@@ -621,7 +630,8 @@ def commit_reservation(request):
         # Optional fields
         customer_name = data.get("customerName")
         customer_phone = data.get("customerPhone")
-        brand_id = data.get("brandId")
+        notes = data.get("notes")
+        join_waitlist = data.get("joinWaitlist", False)
 
         slot_center = floor_to_slot(reservation_time)
         window_start = slot_center - timedelta(hours=2)
@@ -644,6 +654,8 @@ def commit_reservation(request):
             )
 
         # 2️⃣ Check ALL affected capacity slots and validate availability
+        # If capacity is exceeded and joinWaitlist is True, we'll handle it differently
+        capacity_exceeded = False
         for slot in affected_slots:
             slot_start_iso = slot.isoformat()
             
@@ -658,33 +670,42 @@ def commit_reservation(request):
             max_capacity = slot_data.get('maxPax', 0)
             
             if current_used + pax > max_capacity:
-                raise Exception("CAPACITY_EXCEEDED")
+                if join_waitlist:
+                    capacity_exceeded = True
+                    break  # Exit loop, will create waitlisted reservation
+                else:
+                    raise Exception("CAPACITY_EXCEEDED")
 
-        # 3️⃣ Update capacity slots (increment usedPax)
-        for slot in affected_slots:
-            slot_start_iso = slot.isoformat()
-            
-            # Get current values for atomic update
-            capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax').eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
-            
-            if capacity_slot.data:
-                current_used = capacity_slot.data[0].get('usedPax', 0)
-                # Update using Supabase update with increment
-                supabase.table('ecosuite_capacity_slot').update({
-                    'usedPax': current_used + pax,
-                    'updatedAt': timezone.now().isoformat()
-                }).eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+        # 3️⃣ Update capacity slots (increment usedPax) only if capacity is available
+        if not capacity_exceeded:
+            for slot in affected_slots:
+                slot_start_iso = slot.isoformat()
+                
+                # Get current values for atomic update
+                capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax').eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
+                
+                if capacity_slot.data:
+                    current_used = capacity_slot.data[0].get('usedPax', 0)
+                    # Update using Supabase update with increment
+                    supabase.table('ecosuite_capacity_slot').update({
+                        'usedPax': current_used + pax,
+                        'updatedAt': timezone.now().isoformat()
+                    }).eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
 
-        # 4️⃣ Create reservation using Supabase upsert
+        # 4️⃣ Create reservation using Supabase
         reservation_id = str(uuid.uuid4())
         now = timezone.now().isoformat()
+        
+        # Determine reservation status
+        reservation_status = 'waitlisted' if capacity_exceeded else 'confirmed'
         
         reservation_data = {
             'id': reservation_id,
             'brandId': brand_id,
+            'outletId': outlet_id,
             'reservationDateTime': reservation_time.isoformat(),
             'numberOfGuests': pax,
-            'status': 'confirmed',
+            'status': reservation_status,
             'idempotencyKey': idempotency_key,
             'createdAt': now,
             'updatedAt': now
@@ -695,8 +716,8 @@ def commit_reservation(request):
             reservation_data['customerName'] = customer_name
         if customer_phone:
             reservation_data['customerPhone'] = customer_phone
-        if brand_id:
-            reservation_data['brandId'] = brand_id
+        if notes:
+            reservation_data['notes'] = notes
         
         # Store channel in createdBy field (repurposing the field)
         reservation_data['createdBy'] = channel
@@ -709,12 +730,13 @@ def commit_reservation(request):
 
         return Response(
             {
-                "status": "confirmed",
+                "status": reservation_status,
                 "reservationId": reservation_id,
                 "pax": pax,
                 "channel": channel,
+                "waitlisted": capacity_exceeded
             },
-            status=status.HTTP_201_CREATED,
+            status=status.HTTP_201_CREATED if not capacity_exceeded else status.HTTP_200_OK,
         )
 
     except Exception as e:
