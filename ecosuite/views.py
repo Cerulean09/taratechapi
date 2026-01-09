@@ -505,10 +505,6 @@ def generate_capacity_slots(request):
                             close_hour = close_time_obj.get('hour', 23)
                             close_minute = close_time_obj.get('minute', 59)
                             
-                            max_pax = operating_hours.get('maxPax', total_capacity)
-                            if max_pax is None or max_pax <= 0:
-                                max_pax = total_capacity
-                            
                             # Create start and end times
                             start_time = timezone.make_aware(
                                 datetime.combine(current_date, datetime.min.time())
@@ -524,15 +520,15 @@ def generate_capacity_slots(request):
                                 slot_start_iso = current_slot.isoformat()
                                 slot_key = (brand_id, slot_start_iso, 'both')
                                 
-                                # Create slot data
+                                # Create slot data - always use maxPax=16 and maxWaitlistedPax=10 for new dates
                                 slot_data = {
                                     'id': str(uuid.uuid4()),
                                     'brandId': brand_id,
                                     'outletId': outlet_id,
                                     'slotStart': slot_start_iso,
                                     'channel': 'both',
-                                    'maxPax': max_pax,
-                                    'maxWaitlistedPax': 10,
+                                    'maxPax': 16,  # Always 16 for new dates
+                                    'maxWaitlistedPax': 10,  # Always 10 for new dates
                                     'usedPax': 0,
                                     'waitlistedPax': 0,
                                     'version': 0
@@ -561,51 +557,107 @@ def generate_capacity_slots(request):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         
-        # STEP 5: Fetch existing slots to preserve their values
+        # STEP 5: Fetch ALL existing slots in the date range to handle removed dates
         debug_info["phase"] = "fetch_existing_slots"
-        debug_info["checkpoints"].append("Fetching existing slots to preserve values")
+        debug_info["checkpoints"].append("Fetching existing slots to preserve values and handle removed dates")
         
         existing_slots_map = {}  # {(brandId, slotStart, channel): slot_data}
+        all_existing_slots = []  # All existing slots in date range (for checking removed dates)
         
         try:
-            if all_slots:
-                # Get unique slot starts
-                slot_starts = list(set(slot['slotStart'] for slot in all_slots))
-                
-                # Fetch in batches
-                batch_size = 100
-                for i in range(0, len(slot_starts), batch_size):
-                    batch_starts = slot_starts[i:i + batch_size]
-                    try:
-                        existing_response = supabase.table('ecosuite_capacity_slot').select(
-                            'id, brandId, outletId, slotStart, channel, maxPax, maxWaitlistedPax, usedPax, waitlistedPax, version'
-                        ).eq('brandId', brand_id).eq('channel', 'both').in_('slotStart', batch_starts).execute()
-                        
-                        if existing_response.data:
-                            for existing_slot in existing_response.data:
-                                key = (existing_slot.get('brandId'), existing_slot.get('slotStart'), existing_slot.get('channel'))
-                                existing_slots_map[key] = existing_slot
-                    except Exception as fetch_error:
-                        debug_info["errors"].append({
-                            "phase": "fetch_existing_slots",
-                            "batch": i,
-                            "error": str(fetch_error)
-                        })
+            # Fetch all existing slots for this brand in the date range
+            # This includes slots that might have been removed from operating hours
+            start_datetime = timezone.make_aware(datetime.combine(today, datetime.min.time()))
+            end_datetime = timezone.make_aware(datetime.combine(end_date, datetime.max.time()))
             
-            debug_info["checkpoints"].append(f"Fetched {len(existing_slots_map)} existing slots")
+            # Fetch in batches to avoid query limits
+            batch_size = 1000
+            offset = 0
+            while True:
+                try:
+                    existing_response = supabase.table('ecosuite_capacity_slot').select(
+                        'id, brandId, outletId, slotStart, channel, maxPax, maxWaitlistedPax, usedPax, waitlistedPax, version'
+                    ).eq('brandId', brand_id).eq('channel', 'both').gte('slotStart', start_datetime.isoformat()).lte('slotStart', end_datetime.isoformat()).range(offset, offset + batch_size - 1).execute()
+                    
+                    if not existing_response.data or len(existing_response.data) == 0:
+                        break
+                    
+                    all_existing_slots.extend(existing_response.data)
+                    
+                    # Also add to map for merging
+                    for existing_slot in existing_response.data:
+                        key = (existing_slot.get('brandId'), existing_slot.get('slotStart'), existing_slot.get('channel'))
+                        existing_slots_map[key] = existing_slot
+                    
+                    if len(existing_response.data) < batch_size:
+                        break
+                    
+                    offset += batch_size
+                except Exception as fetch_error:
+                    debug_info["errors"].append({
+                        "phase": "fetch_existing_slots",
+                        "offset": offset,
+                        "error": str(fetch_error)
+                    })
+                    break
+            
+            debug_info["checkpoints"].append(f"Fetched {len(existing_slots_map)} existing slots in date range")
         except Exception as e:
             debug_info["errors"].append({"phase": "fetch_existing_slots", "error": str(e)})
             # Continue anyway - will create new slots
         
-        # STEP 6: Merge existing slot data with generated slots
+        # STEP 6: Merge existing slot data with generated slots and handle removed dates
         debug_info["phase"] = "merge_slots"
         debug_info["checkpoints"].append("Merging existing slot data with generated slots")
         
         slots_to_upsert = []
         slots_updated = 0
         slots_created = 0
+        slots_removed = 0  # Slots that were removed from operating hours
+        
+        # Helper function to check if a slot date is in operating hours
+        def is_slot_in_operating_hours(slot_start_iso, outlet_operating_hours):
+            """Check if a slot's date is present in the operating hours."""
+            try:
+                slot_dt = datetime.fromisoformat(slot_start_iso.replace('Z', '+00:00'))
+                jakarta_tz = timezone.get_fixed_timezone(7 * 60)  # UTC+7
+                slot_dt_jakarta = slot_dt.astimezone(jakarta_tz)
+                slot_date = slot_dt_jakarta.date()
+                date_str = slot_date.isoformat()
+                day_of_week = slot_date.weekday()  # 0 = Monday, 6 = Sunday
+                
+                if not outlet_operating_hours:
+                    return False
+                
+                day_based_hours = outlet_operating_hours.get('dayBasedHours', [])
+                date_exceptions = outlet_operating_hours.get('dateExceptions', [])
+                
+                # Check date exceptions first
+                exception_map = {exc.get('date'): exc for exc in date_exceptions if exc.get('date')}
+                if date_str in exception_map:
+                    exception = exception_map[date_str]
+                    if exception.get('isClosed', False):
+                        return False
+                    # Check if it has openTime and closeTime
+                    if exception.get('openTime') is not None and exception.get('closeTime') is not None:
+                        return True
+                    return False
+                
+                # Check day-based hours
+                day_hours = next((dh for dh in day_based_hours if dh.get('day') == day_of_week), None)
+                if day_hours and day_hours.get('openTime') is not None and day_hours.get('closeTime') is not None:
+                    # For weekly slots, only valid within 30 days
+                    weekly_limit_date = today + timedelta(days=30)
+                    if slot_date <= weekly_limit_date:
+                        return True
+                    return False
+                
+                return False
+            except Exception:
+                return False
         
         try:
+            # Process newly generated slots
             for slot_data in all_slots:
                 key = (slot_data['brandId'], slot_data['slotStart'], slot_data['channel'])
                 
@@ -613,29 +665,72 @@ def generate_capacity_slots(request):
                     # Preserve existing values
                     existing = existing_slots_map[key]
                     slot_data['id'] = existing.get('id') or slot_data['id']
-                    # Preserve outletId from existing or use the one in slot_data (which was set during generation)
                     slot_data['outletId'] = existing.get('outletId') or slot_data.get('outletId')
                     slot_data['usedPax'] = existing.get('usedPax', 0) or 0
                     slot_data['waitlistedPax'] = existing.get('waitlistedPax', 0) or 0
                     slot_data['version'] = existing.get('version', 0) or 0
+                    # Update maxPax and maxWaitlistedPax for new dates (16 and 10)
+                    slot_data['maxPax'] = 16
+                    slot_data['maxWaitlistedPax'] = 10
                     slots_updated += 1
                 else:
+                    # New slot - set maxPax and maxWaitlistedPax to 16 and 10
+                    slot_data['maxPax'] = 16
+                    slot_data['maxWaitlistedPax'] = 10
                     slots_created += 1
                 
-                # Ensure outletId is present (should already be set during generation)
+                # Ensure outletId is present
                 if 'outletId' not in slot_data or not slot_data.get('outletId'):
                     debug_info["errors"].append({
                         "phase": "merge_slots",
                         "error": f"Missing outletId for slot {slot_data.get('slotStart')}",
                         "slot_data_keys": list(slot_data.keys())
                     })
-                    continue  # Skip this slot to avoid database error
+                    continue
                 
                 slots_to_upsert.append(slot_data)
             
-            debug_info["checkpoints"].append(f"Merged slots: {slots_created} new, {slots_updated} updated")
+            # Process existing slots that are no longer in operating hours
+            # Group existing slots by outlet to check against their operating hours
+            for outlet in outlets:
+                outlet_id = outlet.get('id')
+                if not outlet_id:
+                    continue
+                
+                online_operating_hours = outlet.get('onlineOperatingHours', {})
+                
+                # Find all existing slots for this outlet that are not in the new slots
+                for existing_slot in all_existing_slots:
+                    existing_outlet_id = existing_slot.get('outletId')
+                    if existing_outlet_id != outlet_id:
+                        continue
+                    
+                    slot_start = existing_slot.get('slotStart')
+                    key = (brand_id, slot_start, 'both')
+                    
+                    # If this slot is not in the newly generated slots, check if it should be removed
+                    if key not in valid_slot_keys:
+                        # Check if this slot's date is still in operating hours
+                        if not is_slot_in_operating_hours(slot_start, online_operating_hours):
+                            # This slot was removed - set maxPax and maxWaitlistedPax to 0
+                            removed_slot_data = {
+                                'id': existing_slot.get('id'),
+                                'brandId': brand_id,
+                                'outletId': outlet_id,
+                                'slotStart': slot_start,
+                                'channel': 'both',
+                                'maxPax': 0,  # Set to 0 for removed dates
+                                'maxWaitlistedPax': 0,  # Set to 0 for removed dates
+                                'usedPax': existing_slot.get('usedPax', 0) or 0,
+                                'waitlistedPax': existing_slot.get('waitlistedPax', 0) or 0,
+                                'version': existing_slot.get('version', 0) or 0
+                            }
+                            slots_to_upsert.append(removed_slot_data)
+                            slots_removed += 1
+            
+            debug_info["checkpoints"].append(f"Merged slots: {slots_created} new, {slots_updated} updated, {slots_removed} removed")
         except Exception as e:
-            debug_info["errors"].append({"phase": "merge_slots", "error": str(e)})
+            debug_info["errors"].append({"phase": "merge_slots", "error": str(e), "traceback": traceback.format_exc()})
             return Response(
                 {"error": "Failed to merge slots", "message": str(e), "debug_info": debug_info},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -685,6 +780,7 @@ def generate_capacity_slots(request):
             "totalSlotsGenerated": len(all_slots),
             "totalSlotsCreated": slots_created,
             "totalSlotsUpdated": slots_updated,
+            "totalSlotsRemoved": slots_removed,
             "totalSlotsUpserted": total_upserted,
             "totalSlotsFailed": total_failed,
             "outlets": outlet_results,
@@ -1838,13 +1934,27 @@ def get_available_capacity_slots(request):
                 status=status.HTTP_200_OK,
             )
         
-        # Filter for available slots (usedPax < maxPax)
+        # Filter for available slots and calculate total allowed guests
         available_slots = []
         for slot in slots_response.data:
             used_pax = slot.get('usedPax', 0) or 0
             max_pax = slot.get('maxPax', 0) or 0
+            max_waitlisted = slot.get('maxWaitlistedPax', 10) or 10
+            waitlisted_pax = slot.get('waitlistedPax', 0) or 0
             
-            # Only include slots with available capacity
+            # Calculate available capacities
+            available_pax = max_pax - used_pax
+            available_waitlist_pax = max_waitlisted - waitlisted_pax
+            
+            # Calculate total allowed guests (availablePax + availableWaitlistPax)
+            # This can be negative if waitlist is overbooked
+            total_allowed_guests = available_pax + available_waitlist_pax
+            
+            # Check if waitlist is overbooked (availableWaitlistPax < 0)
+            is_waitlist_overbooked = available_waitlist_pax < 0
+            
+            # Only include slots with available capacity (usedPax < maxPax)
+            # Even if waitlist is overbooked, we still show the slot if regular capacity is available
             if used_pax < max_pax:
                 slot_info = {
                     'id': slot.get('id'),
@@ -1854,17 +1964,17 @@ def get_available_capacity_slots(request):
                     'channel': slot.get('channel'),
                     'maxPax': max_pax,
                     'usedPax': used_pax,
-                    'availablePax': max_pax - used_pax,
-                    'capacityPercentage': round((used_pax / max_pax * 100) if max_pax > 0 else 0, 2)
+                    'availablePax': available_pax,
+                    'capacityPercentage': round((used_pax / max_pax * 100) if max_pax > 0 else 0, 2),
+                    'totalAllowedGuests': total_allowed_guests,
+                    'isWaitlistOverbooked': is_waitlist_overbooked
                 }
                 
                 # Include waitlist info if requested
                 if include_waitlist_info:
-                    max_waitlisted = slot.get('maxWaitlistedPax', 10) or 10
-                    waitlisted_pax = slot.get('waitlistedPax', 0) or 0
                     slot_info['maxWaitlistedPax'] = max_waitlisted
                     slot_info['waitlistedPax'] = waitlisted_pax
-                    slot_info['availableWaitlistPax'] = max_waitlisted - waitlisted_pax
+                    slot_info['availableWaitlistPax'] = available_waitlist_pax
                     slot_info['waitlistCapacityPercentage'] = round((waitlisted_pax / max_waitlisted * 100) if max_waitlisted > 0 else 0, 2)
                 
                 available_slots.append(slot_info)
@@ -4813,120 +4923,79 @@ def check_reservation_availability(request):
                 "message": str(e)
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Convert reservation datetime to UTC for slot lookup
-        jakarta_tz = timezone.get_fixed_timezone(7 * 60)  # UTC+7
-        try:
-            if '+' in reservation_date_time or 'Z' in reservation_date_time:
-                dt_parsed = datetime.fromisoformat(reservation_date_time.replace('Z', '+00:00'))
-            else:
-                # Assume UTC+7 if no timezone
-                dt_naive = datetime.fromisoformat(reservation_date_time)
-                dt_parsed = timezone.make_aware(dt_naive, jakarta_tz)
-            
-            # Convert to UTC for slot lookup
-            dt_utc = dt_parsed.astimezone(timezone.utc)
-            slot_start = floor_to_slot(dt_utc)
-            slot_start_iso = slot_start.isoformat()
-        except Exception as e:
-            return Response({
-                "error": "Invalid date/time format",
-                "message": str(e)
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Fetch capacity slot for the requested time
-        slot_response = supabase.table('ecosuite_capacity_slot').select(
-            'id, brandId, outletId, slotStart, channel, maxPax, usedPax, maxWaitlistedPax, waitlistedPax'
-        ).eq('brandId', brand_id).eq('outletId', outlet_id).eq('channel', 'both').eq('slotStart', slot_start_iso).execute()
-        
-        if not slot_response.data or len(slot_response.data) == 0:
+        # Get maxPax from operating hours
+        max_pax = _get_max_pax_from_operating_hours(outlet, reservation_date)
+        if max_pax is None:
             return Response({
                 "available": False,
                 "hasConflicts": True,
                 "hasCapacityConflict": True,
-                "conflictReason": ["slot_not_found"],
-                "message": "Capacity slot not found for this time. Please run slot generation first.",
-                "requestedDateTime": reservation_date_time,
-                "requestedGuests": number_of_guests
-            }, status=status.HTTP_200_OK)
-        
-        slot = slot_response.data[0]
-        max_pax = slot.get('maxPax', 0) or 0
-        used_pax = slot.get('usedPax', 0) or 0
-        max_waitlisted_pax = slot.get('maxWaitlistedPax', 0) or 0
-        waitlisted_pax = slot.get('waitlistedPax', 0) or 0
-        
-        # Calculate total capacity and total used
-        total_capacity = max_pax + max_waitlisted_pax
-        total_used = used_pax + waitlisted_pax
-        total_available = total_capacity - total_used
-        
-        # Calculate available regular capacity and waitlist capacity
-        available_regular_pax = max_pax - used_pax
-        available_waitlist_pax = max_waitlisted_pax - waitlisted_pax
-        
-        # Determine how many guests can be accommodated
-        # If requested guests exceed total available, only allow the available amount
-        allowed_guests = min(number_of_guests, total_available)
-        needs_waitlist = number_of_guests > total_available or total_available <= 0
-        
-        # If allowed_guests is 0 or negative, no capacity available
-        if total_available <= 0:
-            return Response({
-                "available": False,
-                "hasConflicts": True,
-                "hasCapacityConflict": True,
-                "conflictReason": ["capacity_exceeded"],
-                "message": f"No capacity available. Total capacity: {total_capacity}, Total used: {total_used}.",
+                "conflictReason": ["no_max_pax_configured"],
+                "message": "This date is unavailable. No maximum capacity is configured for this date.",
                 "requestedDateTime": reservation_date_time,
                 "requestedGuests": number_of_guests,
-                "allowedGuests": 0,
-                "totalCapacity": total_capacity,
-                "totalUsed": total_used,
-                "totalAvailable": total_available,
-                "maxPax": max_pax,
-                "usedPax": used_pax,
-                "maxWaitlistedPax": max_waitlisted_pax,
-                "waitlistedPax": waitlisted_pax,
-                "availableRegularPax": available_regular_pax,
-                "availableWaitlistPax": available_waitlist_pax,
-                "recommendedStatus": "waitlisted",
-                "suggestedAction": "join_waitlist_or_choose_another_time"
+                "maxPax": None
             }, status=status.HTTP_200_OK)
+        
+        # Get isMaxPaxExclusive flag
+        online_hours = outlet.get('onlineOperatingHours', {})
+        is_max_pax_exclusive = online_hours.get('isMaxPaxExclusive', False)
+        
+        # Fetch existing reservations in the 2-hour window
+        # Filter: match outlet, status not pending/cancelled, within time window
+        query = supabase.table('ecosuite_reservations').select('*').eq('brandId', brand_id).eq('outletId', outlet_id).not_.in_('status', ['pending', 'cancelled']).gte('reservationDateTime', time_before.isoformat()).lte('reservationDateTime', time_after.isoformat())
+        
+        # If exclusive, only count reservations with createdBy == 'website'
+        if is_max_pax_exclusive:
+            query = query.eq('createdBy', 'website')
+        
+        response = query.execute()
+        conflicting_reservations = response.data or []
+        
+        # Calculate current total pax from filtered reservations
+        total_existing_pax = 0
+        for reservation in conflicting_reservations:
+            guests = reservation.get('numberOfGuests', 0)
+            try:
+                guests_int = int(guests) if guests else 0
+                total_existing_pax += guests_int
+            except (ValueError, TypeError):
+                pass
+        
+        # Round current total pax to nearest even number
+        rounded_current_pax = _round_to_nearest_even(total_existing_pax)
+        
+        # Check capacity with new reservation
+        total_with_new = rounded_current_pax + number_of_guests
+        has_capacity_conflict = total_with_new > max_pax
         
         # Build response
         conflict_reason = []
-        if needs_waitlist:
+        if has_capacity_conflict:
             conflict_reason.append("capacity_exceeded")
         
-        if needs_waitlist:
-            if allowed_guests > 0:
-                message = f"Only {allowed_guests} out of {number_of_guests} guests can be accommodated. Total capacity: {total_capacity}, Total used: {total_used}, Available: {total_available}. The reservation will be added to the waitlist."
-            else:
-                message = f"No capacity available. Total capacity: {total_capacity}, Total used: {total_used}."
+        if has_capacity_conflict:
+            message = f"Capacity limit reached. Current: {rounded_current_pax} pax (rounded from {total_existing_pax} pax), max: {max_pax} pax. Your request for {number_of_guests} pax would result in {total_with_new} pax, exceeding the limit. You can join the waitlist."
         else:
-            message = f"Reservations available for this time slot. Total capacity: {total_capacity}, Total used: {total_used}, Available: {total_available}."
+            message = "Reservations available for this time slot"
         
         return Response({
-            "available": not needs_waitlist,
-            "hasConflicts": needs_waitlist,
-            "hasTimeConflicts": False,
-            "hasCapacityConflict": needs_waitlist,
+            "available": not has_capacity_conflict,
+            "hasConflicts": has_capacity_conflict,
+            "hasTimeConflicts": False,  # Time conflicts are now part of capacity check
+            "hasCapacityConflict": has_capacity_conflict,
             "conflictReason": conflict_reason,
             "requestedDateTime": reservation_date_time,
             "requestedGuests": number_of_guests,
-            "allowedGuests": allowed_guests,
-            "totalCapacity": total_capacity,
-            "totalUsed": total_used,
-            "totalAvailable": total_available,
+            "totalExistingPax": total_existing_pax,
+            "roundedCurrentPax": rounded_current_pax,
+            "totalWithNew": total_with_new,
             "maxPax": max_pax,
-            "usedPax": used_pax,
-            "maxWaitlistedPax": max_waitlisted_pax,
-            "waitlistedPax": waitlisted_pax,
-            "availableRegularPax": available_regular_pax,
-            "availableWaitlistPax": available_waitlist_pax,
+            "isMaxPaxExclusive": is_max_pax_exclusive,
+            "conflictingReservations": len(conflicting_reservations),
             "message": message,
-            "recommendedStatus": "waitlisted" if needs_waitlist else "pending",
-            "suggestedAction": None if not needs_waitlist else "join_waitlist_or_choose_another_time"
+            "recommendedStatus": "waitlisted" if has_capacity_conflict else "pending",
+            "suggestedAction": None if not has_capacity_conflict else "join_waitlist_or_choose_another_time"
         }, status=status.HTTP_200_OK)
         
     except Exception as e:
