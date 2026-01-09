@@ -1007,7 +1007,27 @@ def commit_reservation(request):
             return Response(
                 {
                     "error": "CAPACITY_EXCEEDED",
-                    "message": "Capacity exceeded for the requested time period",
+                    "message": "Capacity exceeded for the requested time period. Please join the waitlist or choose another time.",
+                    "reason": error_str
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        
+        if "WAITLIST_FULL" in error_str:
+            return Response(
+                {
+                    "error": "WAITLIST_FULL",
+                    "message": "Waitlist is full for the requested time period",
+                    "reason": error_str
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        
+        if "WAITLIST_REQUIRED_DUE_TO_QUEUE" in error_str:
+            return Response(
+                {
+                    "error": "WAITLIST_REQUIRED_DUE_TO_QUEUE",
+                    "message": "There is an existing waitlist queue for this time period. Please set joinWaitlist=true to join the queue.",
                     "reason": error_str
                 },
                 status=status.HTTP_409_CONFLICT,
