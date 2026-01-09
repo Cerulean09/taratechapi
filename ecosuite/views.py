@@ -1305,27 +1305,66 @@ def audit_capacity_slots(request):
             )
         
         # STEP 3: Fetch existing slots to preserve other fields
+        # We need to fetch ALL slots that might have been affected, not just those with current reservations
+        # This includes slots that had reservations but were deleted (to reset their counts to 0)
         debug_info["checkpoints"].append("Fetching existing slots to preserve values")
         slot_starts = [totals['timeslot'] for totals in slot_totals.values()]
         existing_slots_map = {}  # {(brandId, outletId, slotStart): slot_data}
         
-        # Fetch in batches
-        batch_size = 100
-        for i in range(0, len(slot_starts), batch_size):
-            batch_starts = slot_starts[i:i + batch_size]
-            try:
-                existing_response = supabase.table('ecosuite_capacity_slot').select(
-                    'id, brandId, outletId, slotStart, channel, maxPax, maxWaitlistedPax, usedPax, waitlistedPax, version'
-                ).eq('brandId', brand_id).eq('outletId', outlet_id).eq('channel', 'both').in_('slotStart', batch_starts).execute()
-                
-                if existing_response.data:
-                    for existing_slot in existing_response.data:
-                        key = (existing_slot.get('brandId'), existing_slot.get('outletId'), existing_slot.get('slotStart'))
-                        existing_slots_map[key] = existing_slot
-            except Exception as fetch_error:
-                pass
+        # Fetch slots that have current reservations
+        if slot_starts:
+            batch_size = 100
+            for i in range(0, len(slot_starts), batch_size):
+                batch_starts = slot_starts[i:i + batch_size]
+                try:
+                    existing_response = supabase.table('ecosuite_capacity_slot').select(
+                        'id, brandId, outletId, slotStart, channel, maxPax, maxWaitlistedPax, usedPax, waitlistedPax, version'
+                    ).eq('brandId', brand_id).eq('outletId', outlet_id).eq('channel', 'both').in_('slotStart', batch_starts).execute()
+                    
+                    if existing_response.data:
+                        for existing_slot in existing_response.data:
+                            key = (existing_slot.get('brandId'), existing_slot.get('outletId'), existing_slot.get('slotStart'))
+                            existing_slots_map[key] = existing_slot
+                except Exception as fetch_error:
+                    pass
         
-        debug_info["checkpoints"].append(f"Fetched {len(existing_slots_map)} existing slots")
+        # Also fetch slots that might have had reservations but don't anymore
+        # Get all slots for this brand/outlet that have non-zero usedPax or waitlistedPax
+        # and are within the date range we're auditing
+        try:
+            # Calculate date range for slot query (from today to 5 years ahead)
+            now = timezone.now()
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            five_years_ahead = today_start + timedelta(days=1825, hours=23, minutes=59, seconds=59)
+            
+            # Fetch slots with non-zero usedPax
+            slots_with_used = supabase.table('ecosuite_capacity_slot').select(
+                'id, brandId, outletId, slotStart, channel, maxPax, maxWaitlistedPax, usedPax, waitlistedPax, version'
+            ).eq('brandId', brand_id).eq('outletId', outlet_id).eq('channel', 'both').gte('slotStart', today_start.isoformat()).lte('slotStart', five_years_ahead.isoformat()).gt('usedPax', 0).execute()
+            
+            # Fetch slots with non-zero waitlistedPax
+            slots_with_waitlist = supabase.table('ecosuite_capacity_slot').select(
+                'id, brandId, outletId, slotStart, channel, maxPax, maxWaitlistedPax, usedPax, waitlistedPax, version'
+            ).eq('brandId', brand_id).eq('outletId', outlet_id).eq('channel', 'both').gte('slotStart', today_start.isoformat()).lte('slotStart', five_years_ahead.isoformat()).gt('waitlistedPax', 0).execute()
+            
+            # Combine both results
+            all_slots_with_counts = []
+            if slots_with_used.data:
+                all_slots_with_counts.extend(slots_with_used.data)
+            if slots_with_waitlist.data:
+                all_slots_with_counts.extend(slots_with_waitlist.data)
+            
+            # Deduplicate by slot key
+            seen_slot_keys = set()
+            for slot in all_slots_with_counts:
+                key = (slot.get('brandId'), slot.get('outletId'), slot.get('slotStart'))
+                if key not in seen_slot_keys and key not in existing_slots_map:
+                    existing_slots_map[key] = slot
+                    seen_slot_keys.add(key)
+        except Exception as fetch_error:
+            pass
+        
+        debug_info["checkpoints"].append(f"Fetched {len(existing_slots_map)} existing slots (including slots that may need reset)")
         
         # STEP 4: Prepare slots for upsert (ensure no duplicates)
         # The slot_totals dictionary already uses (brandId, outletId, timeslot) as key, 
@@ -1333,7 +1372,9 @@ def audit_capacity_slots(request):
         debug_info["checkpoints"].append("Preparing slots for upsert")
         slots_to_upsert = []
         seen_slots = {}  # Track {(brandId, outletId, slotStart): slot_data} to prevent duplicates
+        processed_slot_keys = set()  # Track which slots we've processed from slot_totals
         
+        # First, process slots that have current reservations
         for slot_key, totals in slot_totals.items():
             timeslot = totals['timeslot']
             dedup_key = (totals['brandId'], totals['outletId'], timeslot)
@@ -1372,6 +1413,25 @@ def audit_capacity_slots(request):
             
             seen_slots[dedup_key] = slot_data
             slots_to_upsert.append(slot_data)
+            processed_slot_keys.add(slot_key)
+        
+        # Second, process slots that exist but have no current reservations (reset their counts to 0)
+        for slot_key, existing_slot in existing_slots_map.items():
+            if slot_key not in processed_slot_keys:
+                # This slot had reservations before but they were deleted - reset counts to 0
+                slot_data = {
+                    'id': existing_slot.get('id'),
+                    'brandId': existing_slot.get('brandId'),
+                    'outletId': existing_slot.get('outletId'),
+                    'slotStart': existing_slot.get('slotStart'),
+                    'channel': 'both',
+                    'usedPax': 0,  # Reset to 0 since no reservations exist
+                    'waitlistedPax': 0,  # Reset to 0 since no reservations exist
+                    'maxPax': existing_slot.get('maxPax', 0) or 0,
+                    'maxWaitlistedPax': existing_slot.get('maxWaitlistedPax', 10) or 10,
+                    'version': existing_slot.get('version', 0) or 0
+                }
+                slots_to_upsert.append(slot_data)
         
         debug_info["checkpoints"].append(f"Prepared {len(slots_to_upsert)} slots for upsert")
         
