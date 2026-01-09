@@ -846,20 +846,32 @@ def commit_reservation(request):
             )
 
         # Parse and validate datetime
+        # reservationDateTime is always in UTC+7 format (Asia/Jakarta)
         try:
-            # Handle ISO format with or without timezone
-            if 'Z' in reservation_date_time_str:
-                # Parse UTC time (Z means UTC)
+            jakarta_tz = timezone.get_fixed_timezone(7 * 60)  # UTC+7
+            
+            # Parse the datetime string
+            if '+' in reservation_date_time_str:
+                # Has timezone offset - parse it
+                dt = datetime.fromisoformat(reservation_date_time_str)
+                # If it's already UTC+7, keep it; otherwise convert to UTC+7
+                if dt.tzinfo:
+                    offset_seconds = dt.utcoffset().total_seconds() if dt.utcoffset() else 0
+                    if offset_seconds == 25200:  # UTC+7 (7 * 60 * 60)
+                        reservation_time = dt
+                    else:
+                        # Convert to UTC+7
+                        reservation_time = dt.astimezone(jakarta_tz)
+                else:
+                    reservation_time = timezone.make_aware(dt, jakarta_tz)
+            elif 'Z' in reservation_date_time_str:
+                # Z means UTC, convert to UTC+7
                 dt = datetime.fromisoformat(reservation_date_time_str.replace('Z', '+00:00'))
-                reservation_time = dt  # Keep as UTC
-            elif '+' in reservation_date_time_str or (reservation_date_time_str.count('-') > 2 and 'T' in reservation_date_time_str):
-                # Has timezone offset
-                dt = datetime.fromisoformat(reservation_date_time_str)
-                reservation_time = dt  # Keep with its timezone
+                reservation_time = dt.astimezone(jakarta_tz)
             else:
-                # No timezone info - assume UTC
+                # No timezone info - assume it's already in UTC+7 (naive datetime)
                 dt = datetime.fromisoformat(reservation_date_time_str)
-                reservation_time = timezone.make_aware(dt, timezone.utc)
+                reservation_time = timezone.make_aware(dt, jakarta_tz)
         except (ValueError, TypeError) as e:
             return Response(
                 {
@@ -907,16 +919,21 @@ def commit_reservation(request):
         notes = data.get("notes")
         join_waitlist = data.get("joinWaitlist", False)
 
-        # Validate reservation date is not in the past
-        today = timezone.now().date()
-        reservation_date = reservation_time.date()
+        # Validate reservation date is not in the past (using Asia/Jakarta timezone)
+        # reservation_time is already in UTC+7 (Jakarta timezone)
+        jakarta_tz = timezone.get_fixed_timezone(7 * 60)  # UTC+7
+        now_jakarta = timezone.now().astimezone(jakarta_tz)
+        today_jakarta = now_jakarta.date()
         
-        if reservation_date < today:
+        # reservation_time is already in Jakarta timezone, so use it directly
+        reservation_date_jakarta = reservation_time.date()
+        
+        if reservation_date_jakarta < today_jakarta:
             return Response(
                 {
                     "error": "Reservation date cannot be in the past",
-                    "reservationDate": reservation_date.isoformat(),
-                    "today": today.isoformat()
+                    "reservationDate": reservation_date_jakarta.isoformat(),
+                    "today": today_jakarta.isoformat()
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -924,7 +941,10 @@ def commit_reservation(request):
         # Note: We don't restrict future dates here - if slots exist, allow the reservation
         # The slot existence check will handle cases where slots haven't been generated
 
-        slot_center = floor_to_slot(reservation_time)
+        # Convert reservation_time (UTC+7) to UTC for slot calculation (slots are stored in UTC)
+        reservation_time_utc = reservation_time.astimezone(timezone.utc)
+
+        slot_center = floor_to_slot(reservation_time_utc)
         window_start = slot_center - timedelta(hours=0)
         window_end = slot_center + timedelta(hours=2)
 
@@ -944,167 +964,35 @@ def commit_reservation(request):
                 status=status.HTTP_200_OK,
             )
 
-        # 2️⃣ Check ALL affected capacity slots and validate availability
-        # Check both usedPax and waitlistedPax capacity
-        capacity_exceeded = False
-        waitlist_full = False
-        missing_slots = []
-        slot_ids = []  # Collect slot IDs for the reservation
+        # 2️⃣, 3️⃣, 4️⃣: Check capacity, update slots, and create reservation via RPC
+        slot_starts = [dt.isoformat() for dt in affected_slots]  # keep ISO with timezone (timestamptz[])
         
-        for slot in affected_slots:
-            slot_start_iso = slot.isoformat()
-            
-            # Check capacity slot with channel="both" - also get the ID and waitlist fields
-            capacity_slot = supabase.table('ecosuite_capacity_slot').select('id, usedPax, maxPax, waitlistedPax, maxWaitlistedPax').eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
-            
-            if not capacity_slot.data:
-                missing_slots.append(slot_start_iso)
-                continue  # Skip to next slot if this one doesn't exist
-            
-            slot_data = capacity_slot.data[0]
-            slot_id = slot_data.get('id')
-            current_used = slot_data.get('usedPax', 0)
-            max_capacity = slot_data.get('maxPax', 0)
-            current_waitlisted = slot_data.get('waitlistedPax', 0)
-            max_waitlisted = slot_data.get('maxWaitlistedPax', 10)  # Default to 10 if not set
-            
-            # Collect slot ID (collect for all slots, even if capacity exceeded)
-            if slot_id:
-                slot_ids.append(slot_id)
-            
-            # Check if regular capacity is full
-            if current_used + pax > max_capacity:
-                # Regular capacity is full, check waitlist
-                if current_waitlisted + pax > max_waitlisted:
-                    # Both regular and waitlist are full - deny reservation
-                    waitlist_full = True
-                    # Don't return here, continue checking all slots to see if any slot has availability
-                    # We'll return error after checking all slots
-                else:
-                    # Waitlist has capacity - can join waitlist
-                    if join_waitlist:
-                        capacity_exceeded = True  # Mark as waitlisted
-                    else:
-                        return Response(
-                            {
-                                "error": "CAPACITY_EXCEEDED",
-                                "message": f"Regular capacity is full. Current: {current_used}/{max_capacity}, Waitlist available: {max_waitlisted - current_waitlisted}",
-                                "currentUsed": current_used,
-                                "maxCapacity": max_capacity,
-                                "currentWaitlisted": current_waitlisted,
-                                "maxWaitlisted": max_waitlisted,
-                                "requestedPax": pax,
-                                "slotStart": slot_start_iso,
-                                "suggestion": "Set joinWaitlist=true to join the waitlist"
-                            },
-                            status=status.HTTP_409_CONFLICT,
-                        )
+        # Format reservation_time (already in UTC+7) as timestamp without timezone info
+        # This represents the local time in Asia/Jakarta (UTC+7)
+        reservation_datetime_timestamp = reservation_time.strftime('%Y-%m-%d %H:%M:%S')
         
-        # If any slots are missing, provide a detailed error
-        if missing_slots:
-            return Response(
-                {
-                    "error": "CAPACITY_SLOT_NOT_FOUND",
-                    "message": f"Capacity slots have not been generated for the requested time period. Please ensure slots are generated for the date range.",
-                    "missingSlots": missing_slots[:5],  # Show first 5 missing slots
-                    "totalMissingSlots": len(missing_slots),
-                    "reservationDateTime": reservation_date_time_str,
-                    "suggestion": "Run the slot generation endpoint for this brand to create capacity slots."
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # If waitlist is full, deny the reservation
-        if waitlist_full:
-            return Response(
-                {
-                    "error": "WAITLIST_FULL",
-                    "message": "Both regular capacity and waitlist are full. Reservation cannot be accepted.",
-                    "suggestion": "Please try a different time slot."
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        # 3️⃣ Update capacity slots (increment usedPax or waitlistedPax) based on availability
-        for slot in affected_slots:
-                slot_start_iso = slot.isoformat()
-                
-                # Get current values for atomic update
-                capacity_slot = supabase.table('ecosuite_capacity_slot').select('usedPax, maxPax, waitlistedPax, maxWaitlistedPax').eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
-                
-                if capacity_slot.data:
-                    slot_info = capacity_slot.data[0]
-                    current_used = slot_info.get('usedPax', 0)
-                    max_capacity = slot_info.get('maxPax', 0)
-                    current_waitlisted = slot_info.get('waitlistedPax', 0)
-                    max_waitlisted = slot_info.get('maxWaitlistedPax', 10)
-                    
-                    # Determine if we should increment usedPax or waitlistedPax
-                    if capacity_exceeded:
-                        # Capacity is full, increment waitlistedPax
-                        if current_waitlisted + pax <= max_waitlisted:
-                            supabase.table('ecosuite_capacity_slot').update({
-                                'waitlistedPax': current_waitlisted + pax,
-                            }).eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
-                    else:
-                        # Capacity available, increment usedPax
-                        if current_used + pax <= max_capacity:
-                            supabase.table('ecosuite_capacity_slot').update({
-                                'usedPax': current_used + pax,
-                            }).eq('brandId', brand_id).eq('slotStart', slot_start_iso).eq('channel', 'both').execute()
-
-        # 4️⃣ Create reservation using Supabase
-        reservation_id = str(uuid.uuid4())
-        now = timezone.now().isoformat()
-        
-        # Determine reservation status
-        # If waitlist is full, reservation should be denied (but we already returned error above)
-        # If capacity exceeded but waitlist available, set to waitlisted
-        reservation_status = 'waitlisted' if capacity_exceeded else 'confirmed'
-        
-        reservation_data = {
-            'id': reservation_id,
-            'brandId': brand_id,
-            'outletId': outlet_id,
-            'reservationDateTime': reservation_time.isoformat(),
-            'numberOfGuests': pax,
-            'status': reservation_status,
-            'idempotencyKey': idempotency_key,
-            'createdAt': now,
-            'updatedAt': now
+        rpc_payload = {
+            "p_brand_id": brand_id,
+            "p_outlet_id": outlet_id,
+            "p_reservation_datetime": reservation_datetime_timestamp,  # timestamp (no tz) - Asia/Jakarta local time
+            "p_slot_starts": slot_starts,  # timestamptz[] - slotStart timestamps
+            "p_pax": pax,  # integer
+            "p_idempotency_key": idempotency_key,  # text
+            "p_channel": channel,  # text
+            "p_customer_name": customer_name,  # text
+            "p_customer_phone": customer_phone,  # text
+            "p_notes": notes,  # text
+            "p_join_waitlist": bool(join_waitlist),  # boolean
         }
         
-        # Add slotIds if we have them
-        if slot_ids:
-            reservation_data['slotIds'] = slot_ids
+        result = supabase.rpc("reserve_slots", rpc_payload).execute()
         
-        # Add optional fields if provided
-        if customer_name:
-            reservation_data['customerName'] = customer_name
-        if customer_phone:
-            reservation_data['customerPhone'] = customer_phone
-        if notes:
-            reservation_data['notes'] = notes
+        # Supabase python returns result.data typically as dict/json
+        data = result.data
         
-        # Store channel in createdBy field (repurposing the field)
-        reservation_data['createdBy'] = channel
-        
-        # Insert reservation
-        response = supabase.table('ecosuite_reservations').insert(reservation_data).execute()
-        
-        if not response.data:
-            raise Exception("Failed to create reservation")
-
-        return Response(
-            {
-                "status": reservation_status,
-                "reservationId": reservation_id,
-                "pax": pax,
-                "channel": channel,
-                "waitlisted": capacity_exceeded
-            },
-            status=status.HTTP_201_CREATED if not capacity_exceeded else status.HTTP_200_OK,
-        )
+        # Handle known errors if your client surfaces them as exceptions;
+        # otherwise your RPC raises exceptions and Supabase returns an error response.
+        return Response(data, status=status.HTTP_200_OK if data.get("status") != "confirmed" else status.HTTP_201_CREATED)
 
     except Exception as e:
         error_str = str(e)
@@ -1249,9 +1137,12 @@ def audit_capacity_slots(request):
         debug_info["checkpoints"].append("Parsing request data")
         debug_info["checkpoints"].append(f"Parsed request: brandId={brand_id}, outletId={outlet_id}")
         
-        # Get current time for filtering reservations from today onwards
+        # Get current time for filtering reservations from today onwards, up to 5 years ahead
         now = timezone.now()
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Calculate 5 years ahead (1825 days = 365 * 5, matching DAYS_AHEAD constant)
+        # Set to end of day to include all reservations on that day
+        five_years_ahead = today_start + timedelta(days=1825, hours=23, minutes=59, seconds=59)
         
         # Define status groups
         regular_statuses = ['pending', 'onHold', 'confirmed', 'verified']
@@ -1278,8 +1169,8 @@ def audit_capacity_slots(request):
                 status=status.HTTP_200_OK,
             )
         
-        # Filter reservations from today onwards (reservationDateTime is in UTC+7, convert to UTC)
-        debug_info["checkpoints"].append("Filtering reservations from today onwards")
+        # Filter reservations from today onwards up to 5 years ahead (reservationDateTime is in UTC+7, convert to UTC)
+        debug_info["checkpoints"].append("Filtering reservations from today onwards up to 5 years ahead")
         reservations = []
         for reservation in reservations_response.data:
             reservation_date_time_str = reservation.get('reservationDateTime')
@@ -1287,45 +1178,75 @@ def audit_capacity_slots(request):
                 continue
             
             try:
-                # Parse reservationDateTime - it's stored in UTC+7, convert to UTC
-                reservation_time = None
+                # Parse reservationDateTime - it's stored as timestamp (no timezone) in UTC+7 format
+                # Convert it to UTC for comparison with today_start and five_years_ahead
+                jakarta_tz = timezone.get_fixed_timezone(7 * 60)  # UTC+7
                 
-                if '+' in reservation_date_time_str and reservation_date_time_str.count('+') == 1:
-                    reservation_time = datetime.fromisoformat(reservation_date_time_str)
-                elif 'Z' in reservation_date_time_str:
-                    reservation_time = datetime.fromisoformat(reservation_date_time_str.replace('Z', ''))
-                    reservation_time = timezone.make_aware(reservation_time, timezone.utc) - timedelta(hours=7)
-                else:
-                    reservation_time = datetime.fromisoformat(reservation_date_time_str)
-                    reservation_time = timezone.make_aware(reservation_time, timezone.utc) - timedelta(hours=7)
-                
-                # Convert from UTC+7 to UTC
-                if reservation_time.tzinfo:
-                    offset_seconds = reservation_time.utcoffset().total_seconds() if reservation_time.utcoffset() else 0
-                    if offset_seconds == 25200:  # UTC+7
-                        reservation_time_utc = reservation_time - timedelta(hours=7)
-                        reservation_time_utc = reservation_time_utc.replace(tzinfo=timezone.utc)
+                # Parse the datetime string
+                if isinstance(reservation_date_time_str, str):
+                    # Try to parse as ISO format
+                    if '+' in reservation_date_time_str:
+                        # Has timezone offset
+                        dt = datetime.fromisoformat(reservation_date_time_str)
+                        # If it's already UTC+7, use it; otherwise convert
+                        if dt.tzinfo:
+                            offset_seconds = dt.utcoffset().total_seconds() if dt.utcoffset() else 0
+                            if offset_seconds == 25200:  # UTC+7
+                                reservation_time_jakarta = dt
+                            else:
+                                reservation_time_jakarta = dt.astimezone(jakarta_tz)
+                        else:
+                            reservation_time_jakarta = timezone.make_aware(dt, jakarta_tz)
+                    elif 'Z' in reservation_date_time_str:
+                        # UTC time, convert to UTC+7
+                        dt = datetime.fromisoformat(reservation_date_time_str.replace('Z', '+00:00'))
+                        reservation_time_jakarta = dt.astimezone(jakarta_tz)
                     else:
-                        reservation_time_utc = reservation_time.astimezone(timezone.utc)
+                        # No timezone - assume it's already in UTC+7 (timestamp format)
+                        dt = datetime.fromisoformat(reservation_date_time_str)
+                        reservation_time_jakarta = timezone.make_aware(dt, jakarta_tz)
                 else:
-                    reservation_time_utc = reservation_time - timedelta(hours=7)
-                    reservation_time_utc = timezone.make_aware(reservation_time_utc, timezone.utc)
+                    # If it's already a datetime object (from database)
+                    dt = reservation_date_time_str
+                    if dt.tzinfo is None:
+                        # Naive datetime - assume UTC+7
+                        reservation_time_jakarta = timezone.make_aware(dt, jakarta_tz)
+                    else:
+                        # Has timezone - convert to UTC+7
+                        reservation_time_jakarta = dt.astimezone(jakarta_tz)
                 
-                # Filter: only reservations from today onwards
-                if reservation_time_utc >= today_start:
+                # Convert from UTC+7 to UTC for comparison
+                reservation_time_utc = reservation_time_jakarta.astimezone(timezone.utc)
+                
+                # Filter: only reservations from today onwards, up to 5 years ahead
+                # Use <= for upper bound to include reservations exactly at the boundary
+                if reservation_time_utc >= today_start and reservation_time_utc <= five_years_ahead:
                     reservations.append({
                         'reservation': reservation,
                         'reservation_time_utc': reservation_time_utc
                     })
-            except (ValueError, TypeError, AttributeError):
+                else:
+                    # Debug: log filtered out reservations (especially for 2028)
+                    if reservation_time_utc.year == 2028:
+                        debug_info["checkpoints"].append(
+                            f"Filtered out 2028 reservation: {reservation_date_time_str} -> "
+                            f"UTC: {reservation_time_utc.isoformat()}, "
+                            f"Range: {today_start.isoformat()} to {five_years_ahead.isoformat()}, "
+                            f"Before start: {reservation_time_utc < today_start}, "
+                            f"After end: {reservation_time_utc > five_years_ahead}"
+                        )
+            except (ValueError, TypeError, AttributeError) as e:
+                # Debug: log parsing errors for troubleshooting
+                debug_info["checkpoints"].append(f"Failed to parse reservationDateTime: {reservation_date_time_str} - {str(e)}")
                 continue
         
-        debug_info["checkpoints"].append(f"Filtered to {len(reservations)} reservations from today onwards")
+        debug_info["checkpoints"].append(f"Filtered to {len(reservations)} reservations from today onwards up to 5 years ahead")
+        debug_info["checkpoints"].append(f"Date range: {today_start.isoformat()} to {five_years_ahead.isoformat()}")
         
         if not reservations:
             return Response(
                 {
-                    "message": "No reservations from today onwards found to audit",
+                    "message": "No reservations from today onwards up to 5 years ahead found to audit",
                     "auditedSlots": 0,
                     "updatedSlots": 0,
                     "debug_info": debug_info
