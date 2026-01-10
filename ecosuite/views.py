@@ -302,36 +302,38 @@ DAYS_AHEAD = 1825
 
 @api_view(["GET", "POST"])
 @permission_classes([AllowAny])
-def generate_capacity_slots(request):
-    """Generate capacity slots based on operating hours.
+def rebuild_capacity_slots(request):
+    """Rebuild capacity slots by calling the RPC function.
     
-    Flow:
-    1. Get brandId, outletId, and onlineOperatingHoursConfig from request
-    2. Generate timeslots in 30-min intervals
-    3. Get existing timeslots
-    4A. If existing timeslots exist, only upsert maxPax and maxWaitlistedPax
-    4B. If no existing timeslots, upsert full row data
+    This function replaces both generate_capacity_slots and audit_capacity_slots.
+    It generates all 30-min slots (24h) and sets maxPax/maxWaitlistedPax based on operating hours.
+    It also recomputes usedPax/waitlistedPax from reservations.
     
     Expected fields in request body:
     - brandId: The brand identifier (required)
     - outletId: The outlet identifier (required)
-    - onlineOperatingHours: Operating hours config (required)
+    - startDate: Start date in YYYY-MM-DD format (optional, defaults to today)
+    - endDate: End date in YYYY-MM-DD format (optional, defaults to 5 years ahead)
+    - channel: Channel type - 'online', 'offline', or 'both' (optional, defaults to 'both')
+    - slotMinutes: Slot duration in minutes (optional, defaults to 30, must be 30)
+    - diningSlots: Number of dining slots (optional, defaults to 5, must be 5)
+    - fallbackMaxPax: Fallback max pax when JSON doesn't provide (optional, defaults to 16)
+    - fallbackMaxWait: Fallback max waitlist pax when JSON doesn't provide (optional, defaults to 10)
+    
+    Note: The RPC resolves maxPax/maxWaitlistedPax from operating hours with priority:
+    1. dateExceptions (if date matches and time is within openTime/closeTime)
+    2. dayBasedHours (if day matches and time is within openTime/closeTime)
+    3. fallbackMaxPax/fallbackMaxWait (if JSON doesn't provide maxPax/maxWaitlistedPax)
+    4. 0 (if outside operating hours or closed)
+    Slots outside operating hours have maxPax=0 and maxWaitlistedPax=0.
     """
     import traceback
-    import uuid
-    
-    debug_info = {
-        "phase": "initialization",
-        "errors": [],
-        "checkpoints": []
-    }
     
     try:
-        # STEP 1: Get brandId, outletId, and onlineOperatingHoursConfig from request
-        debug_info["phase"] = "parse_request"
-        debug_info["checkpoints"].append("Parsing request data")
-        
-        try:
+        # Parse request data
+        if request.method == 'GET':
+            data = request.query_params.dict()
+        else:
             data = request.data
             # Handle QueryDict with _content field
             if hasattr(data, 'get') and data.get('_content'):
@@ -347,380 +349,164 @@ def generate_capacity_slots(request):
                 data = data.dict()
             elif hasattr(data, 'get') and not isinstance(data, dict):
                 data = dict(data)
-            
-            if not isinstance(data, dict):
-                return Response(
-                    {"error": "Invalid request format", "message": "Request body must be valid JSON"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            brand_id = data.get("brandId")
-            outlet_id = data.get("outletId")
-            online_operating_hours = data.get("onlineOperatingHours")
-            
-            if not brand_id:
-                return Response(
-                    {"error": "Missing required field: brandId"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            if not outlet_id:
-                return Response(
-                    {"error": "Missing required field: outletId"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            if not online_operating_hours:
-                return Response(
-                    {"error": "Missing required field: onlineOperatingHours"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            debug_info["checkpoints"].append(f"Parsed request: brandId={brand_id}, outletId={outlet_id}")
-        except Exception as e:
-            debug_info["errors"].append({"phase": "parse_request", "error": str(e)})
+        
+        if not isinstance(data, dict):
             return Response(
-                {"error": "Failed to parse request", "message": str(e), "debug_info": debug_info},
+                {"error": "Invalid request format", "message": "Request body must be valid JSON"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Extract required fields
+        brand_id = data.get("brandId")
+        outlet_id = data.get("outletId")
+        
+        if not brand_id:
+            return Response(
+                {"error": "Missing required field: brandId"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not outlet_id:
+            return Response(
+                {"error": "Missing required field: outletId"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Extract optional fields with defaults
+        today = timezone.now().date()
+        start_date_str = data.get("startDate", today.isoformat())
+        end_date_str = data.get("endDate", (today + timedelta(days=DAYS_AHEAD)).isoformat())
+        channel = data.get("channel", "both")
+        slot_minutes = int(data.get("slotMinutes", 30))
+        dining_slots = int(data.get("diningSlots", 5))
+        fallback_max_pax = int(data.get("fallbackMaxPax", 16))  # Fallback when JSON doesn't provide maxPax
+        fallback_max_wait = int(data.get("fallbackMaxWait", 10))  # Fallback when JSON doesn't provide maxWaitlistedPax
+        
+        # Parse dates
+        try:
+            start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+            end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+        except ValueError as e:
+            return Response(
+                {"error": "Invalid date format", "message": "Dates must be in YYYY-MM-DD format", "details": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate channel
+        if channel not in ['online', 'offline', 'both']:
+            return Response(
+                {"error": "Invalid channel", "message": "Channel must be 'online', 'offline', or 'both'"},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
         # Create Supabase client
-        debug_info["phase"] = "create_client"
-        try:
-            supabase = create_supabase_client()
-            debug_info["checkpoints"].append("Supabase client created")
-        except Exception as e:
-            return Response(
-                {"error": "Failed to create Supabase client", "message": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+        supabase = create_supabase_client()
         
-        # STEP 2: Generate timeslots for brandId, outletId, and onlineOperatingHours in 30-min intervals
-        debug_info["phase"] = "generate_timeslots"
-        debug_info["checkpoints"].append("Generating timeslots in 30-min intervals")
-        
-        today = timezone.now().date()
-        end_date = today + timedelta(days=DAYS_AHEAD)
-        generated_slots = []  # List of generated slot data
-        slot_keys = set()  # Track slot keys: (brandId, outletId, slotStart, channel)
-        
-        try:
-            day_based_hours = online_operating_hours.get('dayBasedHours', [])
-            date_exceptions = online_operating_hours.get('dateExceptions', [])
-            
-            # Create exception map
-            exception_map = {exc.get('date'): exc for exc in date_exceptions if exc.get('date')}
-            
-            # Calculate 30-day limit for weekly timeslots
-            weekly_limit_date = today + timedelta(days=30)
-            
-            current_date = today
-            while current_date <= end_date:
-                date_str = current_date.isoformat()
-                day_of_week = current_date.weekday()  # 0 = Monday, 6 = Sunday
-                
-                # Determine operating hours for this date
-                operating_hours = None
-                is_closed = False
-                
-                if date_str in exception_map:
-                    # This is an exception date
-                    exception = exception_map[date_str]
-                    if exception.get('isClosed', False):
-                        is_closed = True
-                    else:
-                        operating_hours = exception
-                else:
-                    # This is a weekly timeslot (not in exception dates)
-                    # Only generate if within 30 days and if day_hours is not null
-                    day_hours = next((dh for dh in day_based_hours if dh.get('day') == day_of_week), None)
-                    if day_hours and day_hours.get('openTime') is not None:
-                        # Only generate weekly slots within 30 days
-                        if current_date <= weekly_limit_date:
-                            operating_hours = day_hours
-                
-                # Generate slots if operating hours exist and not closed
-                if operating_hours and not is_closed:
-                    open_time_obj = operating_hours.get('openTime')
-                    close_time_obj = operating_hours.get('closeTime')
-                    
-                    if open_time_obj and close_time_obj:
-                        open_hour = open_time_obj.get('hour', 0)
-                        open_minute = open_time_obj.get('minute', 0)
-                        close_hour = close_time_obj.get('hour', 23)
-                        close_minute = close_time_obj.get('minute', 59)
-                        
-                        # Create start and end times
-                        start_time = timezone.make_aware(
-                            datetime.combine(current_date, datetime.min.time())
-                        ).replace(hour=open_hour, minute=open_minute, second=0, microsecond=0)
-                        
-                        end_time = timezone.make_aware(
-                            datetime.combine(current_date, datetime.min.time())
-                        ).replace(hour=close_hour, minute=close_minute, second=0, microsecond=0)
-                        
-                        # Generate slots for this date in 30-min intervals
-                        current_slot = start_time
-                        while current_slot < end_time:
-                            slot_start_iso = current_slot.isoformat()
-                            slot_key = (brand_id, outlet_id, slot_start_iso, 'both')
-                            
-                            # Create slot data
-                            slot_data = {
-                                'brandId': brand_id,
-                                'outletId': outlet_id,
-                                'slotStart': slot_start_iso,
-                                'channel': 'both',
-                                'maxPax': 16,
-                                'maxWaitlistedPax': 10,
-                            }
-                            
-                            generated_slots.append(slot_data)
-                            slot_keys.add(slot_key)
-                            
-                            current_slot += timedelta(minutes=SLOT_MINUTES)
-                
-                current_date += timedelta(days=1)
-            
-            debug_info["checkpoints"].append(f"Generated {len(generated_slots)} slots")
-        except Exception as e:
-            debug_info["errors"].append({"phase": "generate_timeslots", "error": str(e), "traceback": traceback.format_exc()})
-            return Response(
-                {"error": "Failed to generate timeslots", "message": str(e), "debug_info": debug_info},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-        
-        # STEP 3: Get existing timeslots
-        debug_info["phase"] = "fetch_existing_slots"
-        debug_info["checkpoints"].append("Fetching existing timeslots")
-        
-        existing_slots_map = {}  # {(brandId, outletId, slotStart, channel): slot_data}
-        all_existing_slots = []  # All existing slots in date range (for finding non-matching slots)
-        
-        try:
-            # Fetch ALL existing slots for this brand/outlet in the date range
-            start_datetime = timezone.make_aware(datetime.combine(today, datetime.min.time()))
-            end_datetime = timezone.make_aware(datetime.combine(end_date, datetime.max.time()))
-            
-            # Fetch in batches to avoid query limits
-            batch_size = 1000
-            offset = 0
-            while True:
-                try:
-                    existing_response = supabase.table('ecosuite_capacity_slot').select(
-                        'id, brandId, outletId, slotStart, channel, maxPax, maxWaitlistedPax, usedPax, waitlistedPax, version'
-                    ).eq('brandId', brand_id).eq('outletId', outlet_id).eq('channel', 'both').gte('slotStart', start_datetime.isoformat()).lte('slotStart', end_datetime.isoformat()).range(offset, offset + batch_size - 1).execute()
-                    
-                    if not existing_response.data or len(existing_response.data) == 0:
-                        break
-                    
-                    all_existing_slots.extend(existing_response.data)
-                    
-                    # Also add to map for matching with generated slots
-                    for existing_slot in existing_response.data:
-                        slot_start_raw = existing_slot.get('slotStart')
-                        # Normalize slotStart to ISO format string
-                        try:
-                            if isinstance(slot_start_raw, str):
-                                slot_start_iso = slot_start_raw
-                            else:
-                                slot_start_iso = slot_start_raw.isoformat() if hasattr(slot_start_raw, 'isoformat') else str(slot_start_raw)
-                        except Exception:
-                            slot_start_iso = str(slot_start_raw)
-                        
-                        # Use normalized ISO format for key matching
-                        key = (existing_slot.get('brandId'), existing_slot.get('outletId'), slot_start_iso, existing_slot.get('channel'))
-                        existing_slots_map[key] = existing_slot
-                    
-                    if len(existing_response.data) < batch_size:
-                        break
-                    
-                    offset += batch_size
-                except Exception as fetch_error:
-                    debug_info["errors"].append({
-                        "phase": "fetch_existing_slots",
-                        "offset": offset,
-                        "error": str(fetch_error)
-                    })
-                    break
-            
-            debug_info["checkpoints"].append(f"Fetched {len(existing_slots_map)} existing slots in date range")
-        except Exception as e:
-            debug_info["errors"].append({"phase": "fetch_existing_slots", "error": str(e)})
-            # Continue anyway - will create new slots
-        
-        # STEP 4: Prepare slots for upsert
-        debug_info["phase"] = "prepare_upsert"
-        debug_info["checkpoints"].append("Preparing slots for upsert")
-        
-        slots_to_upsert = []
-        slots_updated = 0
-        slots_created = 0
-        slots_zeroed = 0  # Slots set to maxPax=0 and maxWaitlistedPax=0
-        
-        try:
-            # Process generated slots
-            for slot_data in generated_slots:
-                key = (slot_data['brandId'], slot_data['outletId'], slot_data['slotStart'], slot_data['channel'])
-                
-                if key in existing_slots_map:
-                    # STEP 4A: If existing timeslots exist, only upsert maxPax and maxWaitlistedPax
-                    # Include all primary key fields (brandId, outletId, slotStart, channel) for upsert matching
-                    existing = existing_slots_map[key]
-                    update_data = {
-                        'brandId': brand_id,
-                        'outletId': outlet_id,
-                        'slotStart': slot_data['slotStart'],
-                        'channel': 'both',
-                        'maxPax': 16,
-                        'maxWaitlistedPax': 10,
-                    }
-                    # Include id if it exists (for reference, but primary key matching uses brandId, outletId, slotStart, channel)
-                    if existing.get('id'):
-                        update_data['id'] = existing.get('id')
-                    slots_to_upsert.append(update_data)
-                    slots_updated += 1
-                else:
-                    # STEP 4B: If no existing timeslots, upsert full row data
-                    full_slot_data = {
-                        'id': str(uuid.uuid4()),
-                        'brandId': brand_id,
-                        'outletId': outlet_id,
-                        'slotStart': slot_data['slotStart'],
-                        'channel': 'both',
-                        'maxPax': 16,
-                        'maxWaitlistedPax': 10,
-                        'usedPax': 0,
-                        'waitlistedPax': 0,
-                        'version': 0
-                    }
-                    slots_to_upsert.append(full_slot_data)
-                    slots_created += 1
-            
-            # Process existing slots that don't match any generated slots
-            for existing_slot in all_existing_slots:
-                slot_start_raw = existing_slot.get('slotStart')
-                # Normalize slotStart to ISO format string
-                try:
-                    if isinstance(slot_start_raw, str):
-                        slot_start_iso = slot_start_raw
-                    else:
-                        slot_start_iso = slot_start_raw.isoformat() if hasattr(slot_start_raw, 'isoformat') else str(slot_start_raw)
-                except Exception:
-                    slot_start_iso = str(slot_start_raw)
-                
-                key = (existing_slot.get('brandId'), existing_slot.get('outletId'), slot_start_iso, existing_slot.get('channel'))
-                
-                # If this existing slot doesn't match any generated slot, set maxPax=0 and maxWaitlistedPax=0
-                if key not in slot_keys:
-                    zeroed_slot_data = {
-                        'brandId': brand_id,
-                        'outletId': outlet_id,
-                        'slotStart': slot_start_iso,
-                        'channel': 'both',
-                        'maxPax': 0,
-                        'maxWaitlistedPax': 0,
-                    }
-                    # Include id if it exists (for reference, but primary key matching uses brandId, outletId, slotStart, channel)
-                    if existing_slot.get('id'):
-                        zeroed_slot_data['id'] = existing_slot.get('id')
-                    slots_to_upsert.append(zeroed_slot_data)
-                    slots_zeroed += 1
-            
-            debug_info["checkpoints"].append(f"Prepared {slots_created} new slots, {slots_updated} updates, {slots_zeroed} zeroed")
-        except Exception as e:
-            debug_info["errors"].append({"phase": "prepare_upsert", "error": str(e), "traceback": traceback.format_exc()})
-            return Response(
-                {"error": "Failed to prepare slots", "message": str(e), "debug_info": debug_info},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-        
-        # STEP 5: Upsert to database in batches of 250
-        debug_info["phase"] = "upsert_slots"
-        debug_info["checkpoints"].append("Upserting slots to database")
-        
-        total_upserted = 0
-        total_failed = 0
-        
-        try:
-            if slots_to_upsert:
-                batch_size = 250
-                for i in range(0, len(slots_to_upsert), batch_size):
-                    batch = slots_to_upsert[i:i + batch_size]
-                    try:
-                        # Use upsert with explicit conflict resolution on composite primary key
-                        # Primary key: (brandId, outletId, slotStart, channel)
-                        supabase.table('ecosuite_capacity_slot').upsert(
-                            batch,
-                            on_conflict='brandId,outletId,slotStart,channel'
-                        ).execute()
-                        total_upserted += len(batch)
-                        debug_info["checkpoints"].append(f"Upserted batch {i // batch_size + 1}: {len(batch)} slots")
-                    except Exception as upsert_error:
-                        total_failed += len(batch)
-                        debug_info["errors"].append({
-                            "phase": "upsert_slots",
-                            "batch": i // batch_size + 1,
-                            "error": str(upsert_error),
-                            "error_type": type(upsert_error).__name__
-                        })
-            
-            debug_info["checkpoints"].append(f"Upsert complete: {total_upserted} succeeded, {total_failed} failed")
-        except Exception as e:
-            debug_info["errors"].append({"phase": "upsert_slots", "error": str(e), "traceback": traceback.format_exc()})
-            return Response(
-                {"error": "Failed to upsert slots", "message": str(e), "debug_info": debug_info},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-        
-        # Return results
-        return Response({
-            "status": "slots_generated",
-            "brandId": brand_id,
-            "outletId": outlet_id,
-            "dateRange": {
-                "start": today.isoformat(),
-                "end": end_date.isoformat()
-            },
-            "totalSlotsGenerated": len(generated_slots),
-            "totalSlotsCreated": slots_created,
-            "totalSlotsUpdated": slots_updated,
-            "totalSlotsZeroed": slots_zeroed,
-            "totalSlotsUpserted": total_upserted,
-            "totalSlotsFailed": total_failed,
-            "debug_info": debug_info
-        }, status=status.HTTP_200_OK)
-
-    except KeyError as e:
-        debug_info["errors"].append({
-            "phase": "top_level",
-            "error": f"Missing required field: {str(e)}",
-            "error_type": "KeyError"
-        })
-        return Response(
-            {
-                "error": f"Missing required field: {str(e)}",
-                "debug_info": debug_info
-            },
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    except Exception as e:
-        debug_info["errors"].append({
-            "phase": "top_level",
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "traceback": traceback.format_exc()
-        })
-        error_details = {
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "debug_info": debug_info
+        # Call RPC function
+        rpc_payload = {
+            "p_brand_id": brand_id,
+            "p_outlet_id": outlet_id,
+            "p_start_date": start_date.isoformat(),
+            "p_end_date": end_date.isoformat(),
+            "p_channel": channel,
+            "p_slot_minutes": slot_minutes,
+            "p_dining_slots": dining_slots,
+            "p_fallback_max_pax": fallback_max_pax,
+            "p_fallback_max_wait": fallback_max_wait,
         }
+        
+        result = supabase.rpc("rebuild_capacity_slots", rpc_payload).execute()
+        
+        if result.data is None:
+            return Response(
+                {
+                    "error": "RPC call returned no data",
+                    "message": "The rebuild_capacity_slots RPC call did not return any data"
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        
+        # Return RPC result
+        return Response(result.data, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        error_str = str(e)
+        import traceback
+        error_details = {
+            "error": error_str,
+            "error_type": type(e).__name__
+        }
+        
+        # Handle known RPC errors
+        if "INVALID_BRAND_ID" in error_str:
+            return Response(
+                {
+                    "error": "INVALID_BRAND_ID",
+                    "message": "Invalid or missing brand ID"
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        if "INVALID_OUTLET_ID" in error_str:
+            return Response(
+                {
+                    "error": "INVALID_OUTLET_ID",
+                    "message": "Invalid or missing outlet ID"
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        if "INVALID_DATE_RANGE" in error_str:
+            return Response(
+                {
+                    "error": "INVALID_DATE_RANGE",
+                    "message": "Invalid date range. End date must be after start date."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        if "INVALID_CHANNEL" in error_str:
+            return Response(
+                {
+                    "error": "INVALID_CHANNEL",
+                    "message": "Channel must be 'online', 'offline', or 'both'"
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        if "ONLY_30_MIN_SUPPORTED" in error_str:
+            return Response(
+                {
+                    "error": "ONLY_30_MIN_SUPPORTED",
+                    "message": "Only 30-minute slots are currently supported"
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        if "ONLY_2_HOURS_5_SLOTS_SUPPORTED" in error_str:
+            return Response(
+                {
+                    "error": "ONLY_2_HOURS_5_SLOTS_SUPPORTED",
+                    "message": "Only 2-hour dining windows (5 slots) are currently supported"
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+        if "OUTLET_NOT_FOUND" in error_str:
+            return Response(
+                {
+                    "error": "OUTLET_NOT_FOUND",
+                    "message": "Outlet not found in the specified brand"
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        
         if os.getenv('DEBUG', 'False').lower() == 'true':
             error_details["traceback"] = traceback.format_exc()
+        
         return Response(
             error_details,
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
 @api_view(['POST'])
@@ -1157,312 +943,6 @@ def commit_reservation(request):
 # - floor_to_slot(dt_utc)  -> floors to 30-min boundary (expects aware UTC dt)
 #
 # If your floor_to_slot expects a naive dt, adjust accordingly.
-
-
-@api_view(['GET', 'POST'])
-@permission_classes([AllowAny])
-def audit_capacity_slots(request):
-    """
-    SAFE audit (Option A):
-
-    - Backfills slotIds for reservations that are missing slotIds
-    - Does NOT modify capacity slot counters (usedPax / waitlistedPax)
-    - Does NOT modify maxPax / maxWaitlistedPax
-    - Generates a reconciliation report (counts + warnings)
-
-    Required:
-    - brandId (text)
-    - outletId (text)
-    """
-    supabase = create_supabase_client()
-
-    debug_info = {
-        "checkpoints": [],
-        "warnings": [],
-        "errors": [],
-    }
-
-    def parse_request_data(req):
-        """Support GET query params, POST body, and weird Flutter _content wrapper."""
-        if req.method == 'GET':
-            data = req.query_params.dict()
-        else:
-            data = req.data
-
-        if hasattr(data, 'get') and data.get('_content'):
-            try:
-                content_value = data.get('_content')
-                if isinstance(content_value, list) and len(content_value) > 0:
-                    content_str = content_value[0]
-                elif isinstance(content_value, str):
-                    content_str = content_value
-                else:
-                    content_str = str(content_value)
-                return json.loads(content_str)
-            except Exception as e:
-                raise ValueError(f"Failed to parse _content JSON: {str(e)}")
-
-        if hasattr(data, 'dict'):
-            return data.dict()
-
-        if isinstance(data, dict):
-            return data
-
-        try:
-            return dict(data)
-        except Exception:
-            raise ValueError(f"Invalid request format: {type(data)}")
-
-    def parse_reservation_datetime_to_utc(dt_value):
-        """
-        Parse reservationDateTime that may be stored as:
-        - timestamp without tz (string) meant to be Asia/Jakarta local
-        - ISO string with +07:00
-        - ISO string with Z
-        Return aware UTC datetime.
-        """
-        jakarta_tz = timezone.get_fixed_timezone(7 * 60)
-
-        if isinstance(dt_value, datetime):
-            dt = dt_value
-        else:
-            if not isinstance(dt_value, str) or not dt_value.strip():
-                raise ValueError("Empty reservationDateTime")
-
-            s = dt_value.strip()
-
-            # If "Z" => UTC
-            if s.endswith("Z"):
-                dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-            else:
-                dt = datetime.fromisoformat(s)
-
-        # If dt is naive: assume Asia/Jakarta local
-        if dt.tzinfo is None:
-            dt_jakarta = timezone.make_aware(dt, jakarta_tz)
-        else:
-            # Has tz already; normalize into Jakarta then to UTC
-            dt_jakarta = dt.astimezone(jakarta_tz)
-
-        return dt_jakarta.astimezone(timezone.utc)
-
-    try:
-        debug_info["checkpoints"].append("Parsing request")
-        data = parse_request_data(request)
-
-        brand_id = data.get("brandId")
-        outlet_id = data.get("outletId")
-
-        if not brand_id:
-            return Response({"error": "Missing required field: brandId"}, status=status.HTTP_400_BAD_REQUEST)
-        if not outlet_id:
-            return Response({"error": "Missing required field: outletId"}, status=status.HTTP_400_BAD_REQUEST)
-
-        debug_info["checkpoints"].append(f"brandId={brand_id}, outletId={outlet_id}")
-
-        # Time window: today start UTC -> 5 years ahead end UTC
-        now_utc = timezone.now()
-        today_start_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-        five_years_ahead_utc = today_start_utc + timedelta(days=1825, hours=23, minutes=59, seconds=59)
-
-        # Status rules:
-        regular_statuses = ['pending', 'onHold', 'confirmed', 'verified']  # counts as usedPax
-        waitlisted_status = 'waitlisted'
-        relevant_statuses = regular_statuses + [waitlisted_status]
-
-        debug_info["checkpoints"].append("Fetching reservations (relevant statuses)")
-        reservations_resp = (
-            supabase.table('ecosuite_reservations')
-            .select('id, brandId, outletId, numberOfGuests, status, reservationDateTime, slotIds, createdBy, updatedAt')
-            .eq('brandId', brand_id)
-            .eq('outletId', outlet_id)
-            .in_('status', relevant_statuses)
-            .execute()
-        )
-
-        if not reservations_resp.data:
-            return Response(
-                {
-                    "message": "No reservations found",
-                    "reservationsFetched": 0,
-                    "reservationsInRange": 0,
-                    "reservationsNeedingSlotIds": 0,
-                    "reservationsUpdated": 0,
-                    "debug_info": debug_info,
-                },
-                status=status.HTTP_200_OK
-            )
-
-        debug_info["checkpoints"].append(f"Fetched {len(reservations_resp.data)} reservations")
-
-        # Filter to date range, and identify which need slotIds
-        in_range = []
-        needing_slotids = []
-
-        for r in reservations_resp.data:
-            try:
-                dt_utc = parse_reservation_datetime_to_utc(r.get('reservationDateTime'))
-            except Exception as e:
-                debug_info["warnings"].append({
-                    "type": "PARSE_RESERVATION_DATETIME_FAILED",
-                    "reservationId": r.get('id'),
-                    "reservationDateTime": r.get('reservationDateTime'),
-                    "error": str(e),
-                })
-                continue
-
-            if dt_utc < today_start_utc or dt_utc > five_years_ahead_utc:
-                continue
-
-            in_range.append((r, dt_utc))
-
-            # slotIds can be null OR [] OR {} depending on how you store it
-            slot_ids_val = r.get('slotIds')
-            has_slotids = False
-            if slot_ids_val is None:
-                has_slotids = False
-            elif isinstance(slot_ids_val, list) and len(slot_ids_val) > 0:
-                has_slotids = True
-            elif isinstance(slot_ids_val, dict) and len(slot_ids_val.keys()) > 0:
-                has_slotids = True
-            else:
-                # string / empty list / empty object
-                has_slotids = False
-
-            if not has_slotids:
-                needing_slotids.append((r, dt_utc))
-
-        debug_info["checkpoints"].append(f"In range: {len(in_range)} reservations")
-        debug_info["checkpoints"].append(f"Need slotIds: {len(needing_slotids)} reservations")
-
-        # Build slotStarts for each reservation needing slotIds, group by the same 5-slot window
-        # key = tuple(slot_times_iso_utc_sorted)
-        groups = {}
-        for r, dt_utc in needing_slotids:
-            slot_start = floor_to_slot(dt_utc)  # expects aware UTC
-            slot_times = [(slot_start + timedelta(minutes=30 * i)).isoformat() for i in range(5)]
-            key = tuple(slot_times)
-            groups.setdefault(key, []).append(r)
-
-        debug_info["checkpoints"].append(f"Grouped into {len(groups)} slot windows")
-
-        reservations_updated = 0
-        reservations_skipped_missing_slots = 0
-
-        # For performance: fetch slots per group in one query, and only write reservations if all 5 exist.
-        for slot_times_key, reservations_in_group in groups.items():
-            slot_times = list(slot_times_key)
-
-            # Fetch all matching slots (single query)
-            slots_resp = (
-                supabase.table('ecosuite_capacity_slot')
-                .select('id, slotStart')
-                .eq('brandId', brand_id)
-                .eq('outletId', outlet_id)
-                .eq('channel', 'both')
-                .in_('slotStart', slot_times)
-                .execute()
-            )
-
-            if not slots_resp.data or len(slots_resp.data) != 5:
-                # Slots not generated/opened yet → skip (Option A)
-                reservations_skipped_missing_slots += len(reservations_in_group)
-                continue
-
-            by_start = {s['slotStart']: s['id'] for s in slots_resp.data if s.get('id') and s.get('slotStart')}
-            slot_ids = [by_start.get(t) for t in slot_times]
-            if any(x is None for x in slot_ids) or len(slot_ids) != 5:
-                reservations_skipped_missing_slots += len(reservations_in_group)
-                continue
-
-            # Update each reservation with slotIds (NO slot counter edits here)
-            # NOTE: your slotIds column is json, so store JSON array. Supabase client usually accepts python list.
-            for r in reservations_in_group:
-                rid = r.get('id')
-                if not rid:
-                    continue
-
-                try:
-                    # Update updatedAt in Jakarta local timestamp (if your schema expects that)
-                    now_jakarta = (timezone.now() + timedelta(hours=7)).replace(tzinfo=None).isoformat()
-
-                    upd = (
-                        supabase.table('ecosuite_reservations')
-                        .update({
-                            'slotIds': slot_ids,
-                            'updatedAt': now_jakarta
-                        })
-                        .eq('id', rid)
-                        .execute()
-                    )
-                    reservations_updated += 1
-                except Exception as e:
-                    debug_info["errors"].append({
-                        "type": "RESERVATION_SLOTIDS_UPDATE_FAILED",
-                        "reservationId": rid,
-                        "error": str(e),
-                    })
-
-        # Optional: generate warnings about overcapacity based on current slot table values (READ ONLY)
-        # This helps you see problems without modifying anything.
-        debug_info["checkpoints"].append("Read-only scan for overcapacity slots (optional)")
-        overcap_count = 0
-        overwait_count = 0
-        try:
-            # Scan a reasonable window: today -> 14 days ahead (so it’s not huge)
-            scan_end = today_start_utc + timedelta(days=14, hours=23, minutes=59, seconds=59)
-            slots_scan = (
-                supabase.table('ecosuite_capacity_slot')
-                .select('id, slotStart, maxPax, usedPax, maxWaitlistedPax, waitlistedPax')
-                .eq('brandId', brand_id)
-                .eq('outletId', outlet_id)
-                .eq('channel', 'both')
-                .gte('slotStart', today_start_utc.isoformat())
-                .lte('slotStart', scan_end.isoformat())
-                .execute()
-            )
-            if slots_scan.data:
-                for s in slots_scan.data:
-                    maxp = int(s.get('maxPax') or 0)
-                    used = int(s.get('usedPax') or 0)
-                    maxw = int(s.get('maxWaitlistedPax') or 0)
-                    wait = int(s.get('waitlistedPax') or 0)
-
-                    if maxp > 0 and used > maxp:
-                        overcap_count += 1
-                    if maxw > 0 and wait > (maxw + 2):  # your hard cap policy
-                        overwait_count += 1
-        except Exception as e:
-            debug_info["warnings"].append({"type": "SLOT_SCAN_FAILED", "error": str(e)})
-
-        return Response(
-            {
-                "message": "SAFE audit completed (slotIds backfill only)",
-                "brandId": brand_id,
-                "outletId": outlet_id,
-                "reservationsFetched": len(reservations_resp.data),
-                "reservationsInRange": len(in_range),
-                "reservationsNeedingSlotIds": len(needing_slotids),
-                "reservationsUpdatedWithSlotIds": reservations_updated,
-                "reservationsSkippedMissingSlots": reservations_skipped_missing_slots,
-                "overcapacitySlotsNext14Days": overcap_count,
-                "overwaitlistedSlotsNext14DaysHardCap": overwait_count,
-                "debug_info": debug_info,
-            },
-            status=status.HTTP_200_OK
-        )
-
-    except Exception as e:
-        import traceback
-        err = {
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "debug_info": debug_info
-        }
-        if os.getenv("DEBUG", "False").lower() == "true":
-            err["traceback"] = traceback.format_exc()
-
-        return Response(err, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @api_view(['GET', 'POST'])
 @permission_classes([AllowAny])
@@ -3118,22 +2598,36 @@ def _send_reconfirmation_broadcast(token, reservations, campaign_name='025', tem
 @permission_classes([AllowAny])
 def check_for_reservations_2_days_before_reservation_date(request):
     """Get all confirmed reservations that are scheduled 2 days from today. Compares only the date part, not the time.
-    If reservations are found, automatically sends reconfirmation messages via Koala WhatsApp."""
+    If reservations are found, automatically sends reconfirmation messages via Koala WhatsApp.
+    
+    Query parameters:
+    - brandId: (optional) Filter reservations by brand ID
+    
+    Message routing:
+    - 1-2 pax confirmed reservations → sends previous 1-4 pax confirmation message (campaign '025', template '025')
+    - 3+ pax confirmed reservations → sends previous 5+ pax confirmation message (campaign '028', template '028')
+    """
     supabase = create_supabase_client()
     try:
+        # Get brandId from query parameters (optional)
+        brand_id = request.query_params.get('brandId')
+        
         # Get today's date and calculate target date (2 days from now)
         today = timezone.localdate()
         target_date = today + timedelta(days=2)
         
-        # Get all reservations from the database
-        response = supabase.table('ecosuite_reservations').select('*').execute()
+        # Get reservations from the database, optionally filtered by brandId
+        query = supabase.table('ecosuite_reservations').select('*')
+        if brand_id:
+            query = query.eq('brandId', brand_id)
+        response = query.execute()
         all_reservations = response.data or []
         
         # Filter reservations where the date part matches the target date
-        # 1-4 pax: confirmed reservations
-        # 5+ pax: verified reservations
-        matching_reservations_1_4_pax = []
-        matching_reservations_5_plus_pax = []
+        # 1-2 pax: confirmed reservations → send 1-4 pax confirmation message
+        # 3+ pax: confirmed reservations → send 5+ pax confirmation message
+        matching_reservations_1_2_pax = []
+        matching_reservations_3_plus_pax = []
         for reservation in all_reservations:
             reservation_status = reservation.get('status')
             reservation_date_time = reservation.get('reservationDateTime')
@@ -3162,70 +2656,72 @@ def check_for_reservations_2_days_before_reservation_date(request):
                     except (ValueError, TypeError):
                         number_of_guests_int = 0
                     
-                    # 1-4 pax: must be confirmed
-                    if number_of_guests_int < 5:
-                        if reservation_status == 'confirmed':
-                            matching_reservations_1_4_pax.append(reservation)
-                    # 5+ pax: must be verified
-                    else:
-                        if reservation_status == 'verified':
-                            matching_reservations_5_plus_pax.append(reservation)
+                    # Both groups must be confirmed status
+                    if reservation_status == 'confirmed':
+                        # 1-2 pax: send previous 1-4 pax confirmation message
+                        if number_of_guests_int >= 1 and number_of_guests_int <= 2:
+                            matching_reservations_1_2_pax.append(reservation)
+                        # 3+ pax: send previous 5+ pax confirmation message
+                        elif number_of_guests_int >= 3:
+                            matching_reservations_3_plus_pax.append(reservation)
             except Exception as parse_error:
                 # Skip reservations with invalid datetime format
                 continue
         
         # Authenticate once if either group has reservations (efficient single authentication)
         token = None
-        has_reservations = len(matching_reservations_1_4_pax) > 0 or len(matching_reservations_5_plus_pax) > 0
+        has_reservations = len(matching_reservations_1_2_pax) > 0 or len(matching_reservations_3_plus_pax) > 0
         if has_reservations:
             token = _login_to_koala()
             if not token:
                 # If authentication fails, set error for both groups
-                broadcast_result_1_4 = {"success": False, "error": "Failed to authenticate with Koala"} if matching_reservations_1_4_pax else None
-                broadcast_result_5_plus = {"success": False, "error": "Failed to authenticate with Koala"} if matching_reservations_5_plus_pax else None
+                broadcast_result_1_2 = {"success": False, "error": "Failed to authenticate with Koala"} if matching_reservations_1_2_pax else None
+                broadcast_result_3_plus = {"success": False, "error": "Failed to authenticate with Koala"} if matching_reservations_3_plus_pax else None
             else:
-                # Send reconfirmation messages for 1-4 pax (confirmed reservations)
-                broadcast_result_1_4 = None
-                if matching_reservations_1_4_pax:
-                    broadcast_result_1_4 = _send_reconfirmation_broadcast(token, matching_reservations_1_4_pax, campaign_name='025', template_id='025')
+                # Send reconfirmation messages for 1-2 pax (confirmed reservations) → use previous 1-4 pax message
+                broadcast_result_1_2 = None
+                if matching_reservations_1_2_pax:
+                    broadcast_result_1_2 = _send_reconfirmation_broadcast(token, matching_reservations_1_2_pax, campaign_name='025', template_id='025')
                 
-                # Send reconfirmation messages for 5+ pax (verified reservations)
-                broadcast_result_5_plus = None
-                if matching_reservations_5_plus_pax:
-                    broadcast_result_5_plus = _send_reconfirmation_broadcast(token, matching_reservations_5_plus_pax, campaign_name='028', template_id='028')
+                # Send reconfirmation messages for 3+ pax (confirmed reservations) → use previous 5+ pax message
+                broadcast_result_3_plus = None
+                if matching_reservations_3_plus_pax:
+                    broadcast_result_3_plus = _send_reconfirmation_broadcast(token, matching_reservations_3_plus_pax, campaign_name='028', template_id='028')
         else:
-            broadcast_result_1_4 = None
-            broadcast_result_5_plus = None
+            broadcast_result_1_2 = None
+            broadcast_result_3_plus = None
         
         # Determine if messages were sent successfully
-        messages_sent_1_4 = len(matching_reservations_1_4_pax) > 0 and broadcast_result_1_4 and broadcast_result_1_4.get("success", False)
-        messages_sent_5_plus = len(matching_reservations_5_plus_pax) > 0 and broadcast_result_5_plus and broadcast_result_5_plus.get("success", False)
+        messages_sent_1_2 = len(matching_reservations_1_2_pax) > 0 and broadcast_result_1_2 and broadcast_result_1_2.get("success", False)
+        messages_sent_3_plus = len(matching_reservations_3_plus_pax) > 0 and broadcast_result_3_plus and broadcast_result_3_plus.get("success", False)
         
         # Collect skipped reservations from both groups
-        skipped_1_4 = broadcast_result_1_4.get("reservations_skipped", []) if broadcast_result_1_4 else []
-        skipped_5_plus = broadcast_result_5_plus.get("reservations_skipped", []) if broadcast_result_5_plus else []
-        all_skipped = skipped_1_4 + skipped_5_plus
+        skipped_1_2 = broadcast_result_1_2.get("reservations_skipped", []) if broadcast_result_1_2 else []
+        skipped_3_plus = broadcast_result_3_plus.get("reservations_skipped", []) if broadcast_result_3_plus else []
+        all_skipped = skipped_1_2 + skipped_3_plus
         
         # Get notification counts
-        notifications_sent_1_4 = broadcast_result_1_4.get("notifications_sent", 0) if broadcast_result_1_4 else 0
-        notifications_sent_5_plus = broadcast_result_5_plus.get("notifications_sent", 0) if broadcast_result_5_plus else 0
-        total_notifications_sent = notifications_sent_1_4 + notifications_sent_5_plus
+        notifications_sent_1_2 = broadcast_result_1_2.get("notifications_sent", 0) if broadcast_result_1_2 else 0
+        notifications_sent_3_plus = broadcast_result_3_plus.get("notifications_sent", 0) if broadcast_result_3_plus else 0
+        total_notifications_sent = notifications_sent_1_2 + notifications_sent_3_plus
         
         # Return the JSON of all matching reservations along with broadcast results
         return Response({
-            "reservations": matching_reservations_1_4_pax + matching_reservations_5_plus_pax,
-            "count": len(matching_reservations_1_4_pax) + len(matching_reservations_5_plus_pax),
-            "reservations_1_4_pax": matching_reservations_1_4_pax,
-            "count_1_4_pax": len(matching_reservations_1_4_pax),
-            "reservations_5_plus_pax": matching_reservations_5_plus_pax,
-            "count_5_plus_pax": len(matching_reservations_5_plus_pax),
-            "broadcast_result_1_4_pax": broadcast_result_1_4,
-            "broadcast_result_5_plus_pax": broadcast_result_5_plus,
-            "messages_sent_1_4_pax": messages_sent_1_4,
-            "messages_sent_5_plus_pax": messages_sent_5_plus,
-            "messages_sent": messages_sent_1_4 or messages_sent_5_plus,
-            "notifications_sent_1_4_pax": notifications_sent_1_4,
-            "notifications_sent_5_plus_pax": notifications_sent_5_plus,
+            "brandId": brand_id,
+            "brandId_filtered": brand_id is not None,
+            "reservations": matching_reservations_1_2_pax + matching_reservations_3_plus_pax,
+            "count": len(matching_reservations_1_2_pax) + len(matching_reservations_3_plus_pax),
+            "reservations_1_2_pax": matching_reservations_1_2_pax,
+            "count_1_2_pax": len(matching_reservations_1_2_pax),
+            "reservations_3_plus_pax": matching_reservations_3_plus_pax,
+            "count_3_plus_pax": len(matching_reservations_3_plus_pax),
+            "broadcast_result_1_2_pax": broadcast_result_1_2,
+            "broadcast_result_3_plus_pax": broadcast_result_3_plus,
+            "messages_sent_1_2_pax": messages_sent_1_2,
+            "messages_sent_3_plus_pax": messages_sent_3_plus,
+            "messages_sent": messages_sent_1_2 or messages_sent_3_plus,
+            "notifications_sent_1_2_pax": notifications_sent_1_2,
+            "notifications_sent_3_plus_pax": notifications_sent_3_plus,
             "total_notifications_sent": total_notifications_sent,
             "skipped_reservations": all_skipped,
             "skipped_count": len(all_skipped)
@@ -3280,15 +2776,25 @@ def _send_reservation_reminder_broadcast(token, reservations, campaign_name='022
 @permission_classes([AllowAny])
 def send_reservation_reminder_for_5pax_and_above_2day_before_reservation_date(request):
     """Get all pending reservations with 5+ pax that are scheduled 1 day from today. Compares only the date part, not the time.
-    If reservations are found, automatically sends reminder messages via Koala WhatsApp."""
+    If reservations are found, automatically sends reminder messages via Koala WhatsApp.
+    
+    Query parameters:
+    - brandId: (optional) Filter reservations by brand ID
+    """
     supabase = create_supabase_client()
     try:
+        # Get brandId from query parameters (optional)
+        brand_id = request.query_params.get('brandId')
+        
         # Get today's date and calculate target date (1 day from now)
         today = timezone.localdate()
         target_date = today + timedelta(days=1)
         
-        # Get all reservations from the database
-        response = supabase.table('ecosuite_reservations').select('*').execute()
+        # Get reservations from the database, optionally filtered by brandId
+        query = supabase.table('ecosuite_reservations').select('*')
+        if brand_id:
+            query = query.eq('brandId', brand_id)
+        response = query.execute()
         all_reservations = response.data or []
         
         # Filter reservations where the date part matches the target date, status is pending, and numberOfGuests >= 5
@@ -3351,6 +2857,8 @@ def send_reservation_reminder_for_5pax_and_above_2day_before_reservation_date(re
         
         # Return the JSON of all matching reservations along with broadcast result
         return Response({
+            "brandId": brand_id,
+            "brandId_filtered": brand_id is not None,
             "reservations": matching_reservations,
             "count": len(matching_reservations),
             "broadcast_result": broadcast_result,
@@ -3430,15 +2938,25 @@ def _send_cancel_broadcast(token, reservations, campaign_name='026', template_id
 def send_cancel_notification_for_confirmed_reservations_1day_before_reservation_date(request):
     """Get all confirmed reservations where the reservation date is 1 day from today (tomorrow).
     Compares only the date part, not the time.
-    If reservations are found, automatically sends cancel notification messages via Koala WhatsApp."""
+    If reservations are found, automatically sends cancel notification messages via Koala WhatsApp.
+    
+    Query parameters:
+    - brandId: (optional) Filter reservations by brand ID
+    """
     supabase = create_supabase_client()
     try:
+        # Get brandId from query parameters (optional)
+        brand_id = request.query_params.get('brandId')
+        
         # Get today's date and calculate target date (1 day from today, i.e., tomorrow)
         today = timezone.localdate()
         target_date = today + timedelta(days=1)
         
-        # Get all reservations from the database
-        response = supabase.table('ecosuite_reservations').select('*').execute()
+        # Get reservations from the database, optionally filtered by brandId
+        query = supabase.table('ecosuite_reservations').select('*')
+        if brand_id:
+            query = query.eq('brandId', brand_id)
+        response = query.execute()
         all_reservations = response.data or []
         
         # Filter reservations where the date part matches the target date and status is confirmed
@@ -3525,6 +3043,8 @@ def send_cancel_notification_for_confirmed_reservations_1day_before_reservation_
         
         # Return the JSON of all matching reservations along with broadcast result
         return Response({
+            "brandId": brand_id,
+            "brandId_filtered": brand_id is not None,
             "reservations": matching_reservations,
             "count": len(matching_reservations),
             "broadcast_result": broadcast_result,
@@ -3542,14 +3062,24 @@ def send_cancel_notification_for_confirmed_reservations_1day_before_reservation_
 def check_waitlisted_reservations_with_confirmedExpiryDateTime_expired(request):
     """Check all reservations that have confirmedExpiryDateTime that is not None or null.
     If the current datetime (in WIB/Jakarta timezone) is past the confirmedExpiryDateTime,
-    set the reservation's status to cancelled."""
+    set the reservation's status to cancelled.
+    
+    Query parameters:
+    - brandId: (optional) Filter reservations by brand ID
+    """
     supabase = create_supabase_client()
     try:
+        # Get brandId from query parameters (optional)
+        brand_id = request.query_params.get('brandId')
+        
         # Get current datetime in Jakarta timezone
         current_datetime = timezone.now()
         
-        # Get all reservations from the database
-        response = supabase.table('ecosuite_reservations').select('*').execute()
+        # Get reservations from the database, optionally filtered by brandId
+        query = supabase.table('ecosuite_reservations').select('*')
+        if brand_id:
+            query = query.eq('brandId', brand_id)
+        response = query.execute()
         all_reservations = response.data or []
         
         # Filter reservations with confirmedExpiryDateTime that is not None or null
@@ -3630,6 +3160,8 @@ def check_waitlisted_reservations_with_confirmedExpiryDateTime_expired(request):
         
         # Return the results
         return Response({
+            "brandId": brand_id,
+            "brandId_filtered": brand_id is not None,
             "expired_reservations": expired_reservations,
             "expired_count": len(expired_reservations),
             "updated_reservations": updated_reservations,
@@ -4890,49 +4422,92 @@ def confirm_reservation(request, reservation_id):
         # If action is provided, process it
         if action:
             if action.lower() == 'confirm':
-                # Update reservation status to confirmed and clear waitlistedAt and confirmedExpiryDateTime
-                update_data = {
-                    'status': 'confirmed',
-                    'updatedAt': timezone.now().isoformat(),
-                    'waitlistedAt': None,
-                    'confirmedExpiryDateTime': None
-                }
-                update_response = supabase.table('ecosuite_reservations').update(update_data).eq('id', reservation_id).execute()
-                
-                if update_response.data:
-                    updated_reservation = update_response.data[0]
-                    formatted_datetime_updated = format_reservation_datetime(updated_reservation.get('reservationDateTime', 'N/A'))
-                    return render(request, 'ecosuite/reservation_success.html', {
-                        'reservation': updated_reservation,
-                        'formatted_datetime': formatted_datetime_updated,
-                        'action': 'confirmed'
-                    })
-                else:
+                # Use RPC to reconfirm reservation (validates and changes status from 'confirmed' to 'verified')
+                try:
+                    rpc_result = supabase.rpc("reconfirm_reservation", {
+                        "p_reservation_id": reservation_id
+                    }).execute()
+                    
+                    if rpc_result.data and rpc_result.data.get('ok'):
+                        # RPC succeeded - fetch updated reservation
+                        updated_response = supabase.table('ecosuite_reservations').select('*').eq('id', reservation_id).execute()
+                        if updated_response.data:
+                            updated_reservation = updated_response.data[0]
+                            formatted_datetime_updated = format_reservation_datetime(updated_reservation.get('reservationDateTime', 'N/A'))
+                            return render(request, 'ecosuite/reservation_success.html', {
+                                'reservation': updated_reservation,
+                                'formatted_datetime': formatted_datetime_updated,
+                                'action': 'confirmed'
+                            })
+                        else:
+                            return render(request, 'ecosuite/reservation_error.html', {
+                                'error_title': 'Update Failed',
+                                'error_message': 'Reservation was updated but could not be retrieved.'
+                            })
+                    else:
+                        # RPC returned error
+                        rpc_status = rpc_result.data.get('status', 'UNKNOWN_ERROR') if rpc_result.data else 'RPC_ERROR'
+                        error_messages = {
+                            'INVALID_RESERVATION_ID': 'Invalid reservation ID.',
+                            'RESERVATION_NOT_FOUND': 'Reservation not found.',
+                            'INVALID_STATUS': f"Reservation status must be 'confirmed'. Current status: {rpc_result.data.get('currentStatus', 'unknown')}",
+                            'MISSING_RESERVATION_DATETIME': 'Reservation date/time is missing.',
+                            'TOO_EARLY_TO_RECONFIRM': 'Reservation can only be reconfirmed within 2 days of the reservation date.',
+                            'RESERVATION_DATE_PASSED': 'The reservation date has already passed.'
+                        }
+                        error_message = error_messages.get(rpc_status, f'Failed to confirm reservation: {rpc_status}')
+                        return render(request, 'ecosuite/reservation_error.html', {
+                            'error_title': 'Confirmation Failed',
+                            'error_message': error_message
+                        })
+                except Exception as rpc_error:
                     return render(request, 'ecosuite/reservation_error.html', {
                         'error_title': 'Update Failed',
-                        'error_message': 'Failed to confirm the reservation. Please try again.'
+                        'error_message': f'Failed to confirm the reservation: {str(rpc_error)}'
                     })
                     
             elif action.lower() == 'cancel':
-                # Update reservation status to cancelled
-                update_data = {
-                    'status': 'cancelled',
-                    'updatedAt': timezone.now().isoformat()
-                }
-                update_response = supabase.table('ecosuite_reservations').update(update_data).eq('id', reservation_id).execute()
-                
-                if update_response.data:
+                # Update reservation status to cancelled and send WhatsApp message
+                try:
+                    # First, update reservation status to cancelled
+                    update_data = {
+                        'status': 'cancelled',
+                        'updatedAt': timezone.now().isoformat()
+                    }
+                    update_response = supabase.table('ecosuite_reservations').update(update_data).eq('id', reservation_id).execute()
+                    
+                    if not update_response.data:
+                        return render(request, 'ecosuite/reservation_error.html', {
+                            'error_title': 'Update Failed',
+                            'error_message': 'Failed to cancel the reservation. Please try again.'
+                        })
+                    
                     updated_reservation = update_response.data[0]
                     formatted_datetime_updated = format_reservation_datetime(updated_reservation.get('reservationDateTime', 'N/A'))
+                    
+                    # Send WhatsApp cancellation message
+                    try:
+                        token = _login_to_koala()
+                        if token:
+                            # Send cancel notification using the same function as scheduled cancellations
+                            broadcast_result = _send_cancel_broadcast(token, [updated_reservation], campaign_name='026', template_id='026')
+                            # Note: We don't fail the cancellation if WhatsApp fails, but we log it
+                            if not broadcast_result or not broadcast_result.get("success", False):
+                                # WhatsApp message failed, but cancellation succeeded
+                                pass
+                    except Exception as whatsapp_error:
+                        # WhatsApp message failed, but cancellation succeeded - continue to show success
+                        pass
+                    
                     return render(request, 'ecosuite/reservation_success.html', {
                         'reservation': updated_reservation,
                         'formatted_datetime': formatted_datetime_updated,
                         'action': 'cancelled'
                     })
-                else:
+                except Exception as cancel_error:
                     return render(request, 'ecosuite/reservation_error.html', {
                         'error_title': 'Update Failed',
-                        'error_message': 'Failed to cancel the reservation. Please try again.'
+                        'error_message': f'Failed to cancel the reservation: {str(cancel_error)}'
                     })
             else:
                 return render(request, 'ecosuite/reservation_error.html', {

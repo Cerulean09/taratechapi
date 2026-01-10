@@ -1,0 +1,14 @@
+name: Daily reservation check (9AM WIB)
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # 09:00 WIB = 02:00 UTC
+  workflow_dispatch:
+
+jobs:
+  call_endpoint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: GET to Fly endpoint
+        run: |
+          curl -sS -X GET "https://taratechapi.fly.dev/api/ecosuite/check-for-reservations-2-days-before-reservation-date/?brandId=ILY79IOQG6"

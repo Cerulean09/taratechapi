@@ -1,0 +1,53 @@
+name: Rebuild Capacity Slots
+
+on:
+  schedule:
+    # Run every 5 minutes from 6AM to 12PM Jakarta time (UTC+7)
+    # 6AM Jakarta = 23:00 UTC (previous day)
+    # 12PM (noon) Jakarta = 05:00 UTC (same day)
+    # Cron format: minute hour day month weekday
+    - cron: "*/5 23 * * *"  # Every 5 minutes at hour 23 UTC (6AM-7AM Jakarta)
+    - cron: "*/5 0-4 * * *" # Every 5 minutes from hours 0-4 UTC (7AM-12PM Jakarta)
+    - cron: "0 5 * * *"     # At 05:00 UTC (12PM Jakarta - final run)
+  workflow_dispatch:
+
+jobs:
+  rebuild-slots:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Rebuild capacity slots
+        run: |
+          # Rebuilds capacity slots based on operating hours and recomputes counts from reservations
+          # This replaces both generate_capacity_slots and audit_capacity_slots
+          
+          # Calculate endDate as 1 year from now (YYYY-MM-DD format)
+          if [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS date command
+            end_date=$(date -v+1y +%Y-%m-%d)
+          else
+            # Linux date command
+            end_date=$(date -d "+1 year" +%Y-%m-%d)
+          fi
+          
+          echo "Rebuilding slots until: $end_date"
+          
+          response=$(curl -X POST "https://taratechapi.fly.dev/api/ecosuite/slots/rebuild/" \
+            -H "Content-Type: application/json" \
+            -d "{\"brandId\": \"ILY79IOQG6\",\"outletId\":\"74f2e7c0-bc5a-11f0-9935-313b5fd1007a\",\"endDate\":\"$end_date\",\"channel\":\"both\"}" \
+            -w "\nHTTP_STATUS:%{http_code}" \
+            -s -S)
+          
+          http_code=$(echo "$response" | tail -n1 | sed 's/.*HTTP_STATUS://')
+          body=$(echo "$response" | sed '$d')
+          
+          echo "Response: $body"
+          echo "HTTP Status: $http_code"
+          
+          if [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+            echo "✅ Capacity slots rebuilt successfully"
+          else
+            echo "❌ Capacity slots rebuild failed with HTTP $http_code"
+            exit 1
+          fi
+
