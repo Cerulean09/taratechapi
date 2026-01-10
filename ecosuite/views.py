@@ -770,22 +770,22 @@ def generate_capacity_slots(request):
             )
         
         # Return results
-            return Response({
-                "status": "slots_generated",
-                "brandId": brand_id,
-                "dateRange": {
-                    "start": today.isoformat(),
-                    "end": end_date.isoformat()
-                },
-            "totalSlotsGenerated": len(all_slots),
-            "totalSlotsCreated": slots_created,
-            "totalSlotsUpdated": slots_updated,
-            "totalSlotsRemoved": slots_removed,
-            "totalSlotsUpserted": total_upserted,
-            "totalSlotsFailed": total_failed,
-                "outlets": outlet_results,
-                "debug_info": debug_info
-            }, status=status.HTTP_200_OK)
+        return Response({
+            "status": "slots_generated",
+            "brandId": brand_id,
+            "dateRange": {
+                "start": today.isoformat(),
+                "end": end_date.isoformat()
+            },
+        "totalSlotsGenerated": len(all_slots),
+        "totalSlotsCreated": slots_created,
+        "totalSlotsUpdated": slots_updated,
+        "totalSlotsRemoved": slots_removed,
+        "totalSlotsUpserted": total_upserted,
+        "totalSlotsFailed": total_failed,
+            "outlets": outlet_results,
+            "debug_info": debug_info
+        }, status=status.HTTP_200_OK)
 
     except KeyError as e:
         debug_info["errors"].append({
