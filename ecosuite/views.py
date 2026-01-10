@@ -303,23 +303,22 @@ DAYS_AHEAD = 1825
 @api_view(["GET", "POST"])
 @permission_classes([AllowAny])
 def generate_capacity_slots(request):
-    """Generate capacity slots for all outlets in a brand based on their operational hours.
-    Creates slots with channel="both" for each 30-minute time slot based on operating hours.
+    """Generate capacity slots based on operating hours.
     
     Flow:
-    1. Get the operating hours config
-    2. Generate all the timeslots in a local variable
-    3. Upsert everything to the system database
+    1. Get brandId, outletId, and onlineOperatingHoursConfig from request
+    2. Generate timeslots in 30-min intervals
+    3. Get existing timeslots
+    4A. If existing timeslots exist, only upsert maxPax and maxWaitlistedPax
+    4B. If no existing timeslots, upsert full row data
     
     Expected fields in request body:
-    - brandId: The brand identifier
-    - outletId: (optional) Specific outlet ID
-    - onlineOperatingHours: (optional) Operating hours config
-    
-    Note: Each slot is created with channel="both", version=0, and usedPax=0
-    Slots are generated based on onlineOperatingHours from each outlet in the brand.
+    - brandId: The brand identifier (required)
+    - outletId: The outlet identifier (required)
+    - onlineOperatingHours: Operating hours config (required)
     """
     import traceback
+    import uuid
     
     debug_info = {
         "phase": "initialization",
@@ -328,7 +327,7 @@ def generate_capacity_slots(request):
     }
     
     try:
-        # STEP 1: Parse request data and validate
+        # STEP 1: Get brandId, outletId, and onlineOperatingHoursConfig from request
         debug_info["phase"] = "parse_request"
         debug_info["checkpoints"].append("Parsing request data")
         
@@ -336,18 +335,18 @@ def generate_capacity_slots(request):
             data = request.data
             # Handle QueryDict with _content field
             if hasattr(data, 'get') and data.get('_content'):
-                    content_value = data.get('_content')
-                    if isinstance(content_value, list) and len(content_value) > 0:
-                        content_str = content_value[0]
-                    elif isinstance(content_value, str):
-                        content_str = content_value
-                    else:
-                        content_str = str(content_value)
-                    data = json.loads(content_str)
+                content_value = data.get('_content')
+                if isinstance(content_value, list) and len(content_value) > 0:
+                    content_str = content_value[0]
+                elif isinstance(content_value, str):
+                    content_str = content_value
+                else:
+                    content_str = str(content_value)
+                data = json.loads(content_str)
             elif hasattr(data, 'dict'):
                 data = data.dict()
             elif hasattr(data, 'get') and not isinstance(data, dict):
-                    data = dict(data)
+                data = dict(data)
             
             if not isinstance(data, dict):
                 return Response(
@@ -358,7 +357,6 @@ def generate_capacity_slots(request):
             brand_id = data.get("brandId")
             outlet_id = data.get("outletId")
             online_operating_hours = data.get("onlineOperatingHours")
-            total_capacity = data.get("totalCapacity")  # Optional, can be in request or outlet data
             
             if not brand_id:
                 return Response(
@@ -366,7 +364,19 @@ def generate_capacity_slots(request):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             
-            debug_info["checkpoints"].append(f"Parsed request: brandId={brand_id}, outletId={outlet_id}, hasOnlineOperatingHours={online_operating_hours is not None}")
+            if not outlet_id:
+                return Response(
+                    {"error": "Missing required field: outletId"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if not online_operating_hours:
+                return Response(
+                    {"error": "Missing required field: onlineOperatingHours"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            debug_info["checkpoints"].append(f"Parsed request: brandId={brand_id}, outletId={outlet_id}")
         except Exception as e:
             debug_info["errors"].append({"phase": "parse_request", "error": str(e)})
             return Response(
@@ -374,7 +384,7 @@ def generate_capacity_slots(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # STEP 2: Create Supabase client
+        # Create Supabase client
         debug_info["phase"] = "create_client"
         try:
             supabase = create_supabase_client()
@@ -385,171 +395,94 @@ def generate_capacity_slots(request):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         
-        # STEP 3: Get operating hours config
-        debug_info["phase"] = "get_operating_hours"
-        debug_info["checkpoints"].append("Fetching operating hours configuration")
-        
-        try:
-            if not outlet_id or not online_operating_hours:
-                # Fetch from database
-                brand_response = supabase.table('ecosuite_brands').select('*').eq('id', brand_id).execute()
-                if not brand_response.data:
-                    return Response({"error": "Brand not found"}, status=status.HTTP_404_NOT_FOUND)
-                
-                brand = brand_response.data[0]
-                outlets = brand.get('outlets', [])
-                if not outlets:
-                    return Response({"error": "No outlets found for this brand"}, status=status.HTTP_400_BAD_REQUEST)
-            else:
-                # Use provided data from request body
-                # Extract totalCapacity from request or use default
-                outlet_total_capacity = total_capacity
-                if outlet_total_capacity is None:
-                    # Try to get from onlineOperatingHours maxPax if available
-                    if online_operating_hours and isinstance(online_operating_hours, dict):
-                        date_exceptions = online_operating_hours.get('dateExceptions', [])
-                        if date_exceptions:
-                            # Get maxPax from first date exception that has it
-                            for exc in date_exceptions:
-                                exc_max_pax = exc.get('maxPax')
-                                if exc_max_pax and exc_max_pax > 0:
-                                    outlet_total_capacity = exc_max_pax
-                                    break
-                    # Default to 16 if still not found
-                    if outlet_total_capacity is None:
-                        outlet_total_capacity = 16
-                
-                outlets = [{
-                    'id': outlet_id,
-                    'name': f"Outlet {outlet_id}",
-                    'onlineOperatingHours': online_operating_hours,
-                    'totalCapacity': outlet_total_capacity
-                }]
-            
-            debug_info["checkpoints"].append(f"Found {len(outlets)} outlets")
-        except Exception as e:
-            debug_info["errors"].append({"phase": "get_operating_hours", "error": str(e)})
-            return Response(
-                {"error": "Failed to get operating hours", "message": str(e), "debug_info": debug_info},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-        # STEP 4: Generate all timeslots in local variable
+        # STEP 2: Generate timeslots for brandId, outletId, and onlineOperatingHours in 30-min intervals
         debug_info["phase"] = "generate_timeslots"
-        debug_info["checkpoints"].append("Generating all timeslots in memory")
+        debug_info["checkpoints"].append("Generating timeslots in 30-min intervals")
         
         today = timezone.now().date()
         end_date = today + timedelta(days=DAYS_AHEAD)
-        all_slots = []  # Will contain all slots to upsert
-        valid_slot_keys = set()  # Track valid slots: (brandId, slotStart, channel)
-        outlet_results = []
+        generated_slots = []  # List of generated slot data
+        slot_keys = set()  # Track slot keys: (brandId, outletId, slotStart, channel)
         
         try:
-            for outlet in outlets:
-                outlet_id = outlet.get('id')
-                if not outlet_id:
-                    continue
-                
-                outlet_name = outlet.get('name', outlet_id)
-                online_operating_hours = outlet.get('onlineOperatingHours', {})
-                total_capacity = outlet.get('totalCapacity', 0)
-                
-                day_based_hours = online_operating_hours.get('dayBasedHours', [])
-                date_exceptions = online_operating_hours.get('dateExceptions', [])
-                
-                # Create exception map
-                exception_map = {exc.get('date'): exc for exc in date_exceptions if exc.get('date')}
-                
-                outlet_slots_count = 0
-                current_date = today
-                
-                # Calculate 30-day limit for weekly timeslots
-                weekly_limit_date = today + timedelta(days=30)
-                
-                # Generate slots for each date
-                while current_date <= end_date:
-                    date_str = current_date.isoformat()
-                    day_of_week = current_date.weekday()  # 0 = Monday, 6 = Sunday
-                    
-                    # Determine operating hours for this date
-                    operating_hours = None
-                    is_closed = False
-                    is_exception_date = False
-                    
-                    if date_str in exception_map:
-                        # This is an exception date - process all exception dates (today and forward)
-                        is_exception_date = True
-                        exception = exception_map[date_str]
-                        if exception.get('isClosed', False):
-                            is_closed = True
-                        else:
-                            operating_hours = exception
-                    else:
-                        # This is a weekly timeslot (not in exception dates)
-                        # Only generate if within 30 days and if day_hours is not null
-                        day_hours = next((dh for dh in day_based_hours if dh.get('day') == day_of_week), None)
-                        if day_hours and day_hours.get('openTime') is not None:
-                            # Only generate weekly slots within 30 days
-                            if current_date <= weekly_limit_date:
-                                operating_hours = day_hours
-                            # If beyond 30 days, skip this date (operating_hours remains None)
-                    
-                    # Generate slots if operating hours exist and not closed
-                    if operating_hours and not is_closed:
-                        open_time_obj = operating_hours.get('openTime')
-                        close_time_obj = operating_hours.get('closeTime')
-                        
-                        if open_time_obj and close_time_obj:
-                            open_hour = open_time_obj.get('hour', 0)
-                            open_minute = open_time_obj.get('minute', 0)
-                            close_hour = close_time_obj.get('hour', 23)
-                            close_minute = close_time_obj.get('minute', 59)
-                            
-                            # Create start and end times
-                            start_time = timezone.make_aware(
-                                datetime.combine(current_date, datetime.min.time())
-                            ).replace(hour=open_hour, minute=open_minute, second=0, microsecond=0)
-                            
-                            end_time = timezone.make_aware(
-                                datetime.combine(current_date, datetime.min.time())
-                            ).replace(hour=close_hour, minute=close_minute, second=0, microsecond=0)
-                            
-                            # Generate slots for this date
-                            current_slot = start_time
-                            while current_slot < end_time:
-                                slot_start_iso = current_slot.isoformat()
-                                slot_key = (brand_id, outlet_id, slot_start_iso, 'both')
-                                
-                                # Create slot data - always use maxPax=16 and maxWaitlistedPax=10 for new dates
-                                slot_data = {
-                                    'id': str(uuid.uuid4()),
-                                    'brandId': brand_id,
-                                    'outletId': outlet_id,
-                                    'slotStart': slot_start_iso,
-                                    'channel': 'both',
-                                    'maxPax': 16,  # Always 16 for new dates
-                                    'maxWaitlistedPax': 10,  # Always 10 for new dates
-                                    'usedPax': 0,
-                                    'waitlistedPax': 0,
-                                    'version': 0
-                                }
-                                
-                                all_slots.append(slot_data)
-                                valid_slot_keys.add(slot_key)
-                                outlet_slots_count += 1
-                                
-                                current_slot += timedelta(minutes=SLOT_MINUTES)
-                    
-                    current_date += timedelta(days=1)
-                
-                outlet_results.append({
-                    'brandId': brand_id,
-                    'outletId': outlet_id,
-                    'outletName': outlet_name,
-                    'slotsGenerated': outlet_slots_count
-                })
+            day_based_hours = online_operating_hours.get('dayBasedHours', [])
+            date_exceptions = online_operating_hours.get('dateExceptions', [])
             
-            debug_info["checkpoints"].append(f"Generated {len(all_slots)} slots in memory")
+            # Create exception map
+            exception_map = {exc.get('date'): exc for exc in date_exceptions if exc.get('date')}
+            
+            # Calculate 30-day limit for weekly timeslots
+            weekly_limit_date = today + timedelta(days=30)
+            
+            current_date = today
+            while current_date <= end_date:
+                date_str = current_date.isoformat()
+                day_of_week = current_date.weekday()  # 0 = Monday, 6 = Sunday
+                
+                # Determine operating hours for this date
+                operating_hours = None
+                is_closed = False
+                
+                if date_str in exception_map:
+                    # This is an exception date
+                    exception = exception_map[date_str]
+                    if exception.get('isClosed', False):
+                        is_closed = True
+                    else:
+                        operating_hours = exception
+                else:
+                    # This is a weekly timeslot (not in exception dates)
+                    # Only generate if within 30 days and if day_hours is not null
+                    day_hours = next((dh for dh in day_based_hours if dh.get('day') == day_of_week), None)
+                    if day_hours and day_hours.get('openTime') is not None:
+                        # Only generate weekly slots within 30 days
+                        if current_date <= weekly_limit_date:
+                            operating_hours = day_hours
+                
+                # Generate slots if operating hours exist and not closed
+                if operating_hours and not is_closed:
+                    open_time_obj = operating_hours.get('openTime')
+                    close_time_obj = operating_hours.get('closeTime')
+                    
+                    if open_time_obj and close_time_obj:
+                        open_hour = open_time_obj.get('hour', 0)
+                        open_minute = open_time_obj.get('minute', 0)
+                        close_hour = close_time_obj.get('hour', 23)
+                        close_minute = close_time_obj.get('minute', 59)
+                        
+                        # Create start and end times
+                        start_time = timezone.make_aware(
+                            datetime.combine(current_date, datetime.min.time())
+                        ).replace(hour=open_hour, minute=open_minute, second=0, microsecond=0)
+                        
+                        end_time = timezone.make_aware(
+                            datetime.combine(current_date, datetime.min.time())
+                        ).replace(hour=close_hour, minute=close_minute, second=0, microsecond=0)
+                        
+                        # Generate slots for this date in 30-min intervals
+                        current_slot = start_time
+                        while current_slot < end_time:
+                            slot_start_iso = current_slot.isoformat()
+                            slot_key = (brand_id, outlet_id, slot_start_iso, 'both')
+                            
+                            # Create slot data
+                            slot_data = {
+                                'brandId': brand_id,
+                                'outletId': outlet_id,
+                                'slotStart': slot_start_iso,
+                                'channel': 'both',
+                                'maxPax': 16,
+                                'maxWaitlistedPax': 10,
+                            }
+                            
+                            generated_slots.append(slot_data)
+                            slot_keys.add(slot_key)
+                            
+                            current_slot += timedelta(minutes=SLOT_MINUTES)
+                
+                current_date += timedelta(days=1)
+            
+            debug_info["checkpoints"].append(f"Generated {len(generated_slots)} slots")
         except Exception as e:
             debug_info["errors"].append({"phase": "generate_timeslots", "error": str(e), "traceback": traceback.format_exc()})
             return Response(
@@ -557,44 +490,33 @@ def generate_capacity_slots(request):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         
-        # STEP 5: Fetch ALL existing slots in the date range to handle removed dates
+        # STEP 3: Get existing timeslots
         debug_info["phase"] = "fetch_existing_slots"
-        debug_info["checkpoints"].append("Fetching existing slots to preserve values and handle removed dates")
+        debug_info["checkpoints"].append("Fetching existing timeslots")
         
         existing_slots_map = {}  # {(brandId, outletId, slotStart, channel): slot_data}
-        all_existing_slots = []  # All existing slots in date range (for checking removed dates)
+        all_existing_slots = []  # All existing slots in date range (for finding non-matching slots)
         
         try:
-            # Fetch all existing slots for this brand in the date range
-            # This includes slots that might have been removed from operating hours
+            # Fetch ALL existing slots for this brand/outlet in the date range
             start_datetime = timezone.make_aware(datetime.combine(today, datetime.min.time()))
             end_datetime = timezone.make_aware(datetime.combine(end_date, datetime.max.time()))
-            
-            # Get list of outlet IDs to fetch slots for
-            outlet_ids_to_fetch = [outlet.get('id') for outlet in outlets if outlet.get('id')]
             
             # Fetch in batches to avoid query limits
             batch_size = 1000
             offset = 0
             while True:
                 try:
-                    # Build query - filter by brand and date range
-                    query = supabase.table('ecosuite_capacity_slot').select(
+                    existing_response = supabase.table('ecosuite_capacity_slot').select(
                         'id, brandId, outletId, slotStart, channel, maxPax, maxWaitlistedPax, usedPax, waitlistedPax, version'
-                    ).eq('brandId', brand_id).eq('channel', 'both').gte('slotStart', start_datetime.isoformat()).lte('slotStart', end_datetime.isoformat())
-                    
-                    # Filter by outlet IDs if we have specific outlets
-                    if outlet_ids_to_fetch:
-                        query = query.in_('outletId', outlet_ids_to_fetch)
-                    
-                    existing_response = query.range(offset, offset + batch_size - 1).execute()
+                    ).eq('brandId', brand_id).eq('outletId', outlet_id).eq('channel', 'both').gte('slotStart', start_datetime.isoformat()).lte('slotStart', end_datetime.isoformat()).range(offset, offset + batch_size - 1).execute()
                     
                     if not existing_response.data or len(existing_response.data) == 0:
                         break
                     
                     all_existing_slots.extend(existing_response.data)
                     
-                    # Also add to map for merging - normalize slotStart to ISO format for consistent key matching
+                    # Also add to map for matching with generated slots
                     for existing_slot in existing_response.data:
                         slot_start_raw = existing_slot.get('slotStart')
                         # Normalize slotStart to ISO format string
@@ -627,188 +549,95 @@ def generate_capacity_slots(request):
             debug_info["errors"].append({"phase": "fetch_existing_slots", "error": str(e)})
             # Continue anyway - will create new slots
         
-        # STEP 6: Merge existing slot data with generated slots and handle removed dates
-        debug_info["phase"] = "merge_slots"
-        debug_info["checkpoints"].append("Merging existing slot data with generated slots")
+        # STEP 4: Prepare slots for upsert
+        debug_info["phase"] = "prepare_upsert"
+        debug_info["checkpoints"].append("Preparing slots for upsert")
         
         slots_to_upsert = []
         slots_updated = 0
         slots_created = 0
-        slots_removed = 0  # Slots that were removed from operating hours
-        
-        # Helper function to check if a slot's TIME is within operating hours
-        def is_slot_in_operating_hours(slot_start_iso, outlet_operating_hours):
-            """Check if a slot's date AND time are within the operating hours."""
-            try:
-                slot_dt = datetime.fromisoformat(slot_start_iso.replace('Z', '+00:00'))
-                jakarta_tz = timezone.get_fixed_timezone(7 * 60)  # UTC+7
-                slot_dt_jakarta = slot_dt.astimezone(jakarta_tz)
-                slot_date = slot_dt_jakarta.date()
-                slot_time = slot_dt_jakarta.time()
-                date_str = slot_date.isoformat()
-                day_of_week = slot_date.weekday()  # 0 = Monday, 6 = Sunday
-                
-                if not outlet_operating_hours:
-                    return False
-                
-                day_based_hours = outlet_operating_hours.get('dayBasedHours', [])
-                date_exceptions = outlet_operating_hours.get('dateExceptions', [])
-                
-                # Check date exceptions first
-                exception_map = {exc.get('date'): exc for exc in date_exceptions if exc.get('date')}
-                if date_str in exception_map:
-                    exception = exception_map[date_str]
-                    if exception.get('isClosed', False):
-                        return False
-                    # Check if it has openTime and closeTime
-                    open_time_obj = exception.get('openTime')
-                    close_time_obj = exception.get('closeTime')
-                    if open_time_obj is not None and close_time_obj is not None:
-                        # Extract hour and minute from time objects
-                        open_hour = open_time_obj.get('hour', 0)
-                        open_minute = open_time_obj.get('minute', 0)
-                        close_hour = close_time_obj.get('hour', 23)
-                        close_minute = close_time_obj.get('minute', 59)
-                        
-                        # Create time objects for comparison
-                        open_time = datetime.min.time().replace(hour=open_hour, minute=open_minute)
-                        close_time = datetime.min.time().replace(hour=close_hour, minute=close_minute)
-                        
-                        # Check if slot time is within operating hours
-                        # Slot is valid if it's >= open_time and < close_time
-                        return open_time <= slot_time < close_time
-                    # If exception exists but no openTime/closeTime, date is not valid
-                    return False
-                                            
-                # Check day-based hours
-                day_hours = next((dh for dh in day_based_hours if dh.get('day') == day_of_week), None)
-                if day_hours and day_hours.get('openTime') is not None and day_hours.get('closeTime') is not None:
-                    # For weekly slots, only valid within 30 days
-                    weekly_limit_date = today + timedelta(days=30)
-                    if slot_date <= weekly_limit_date:
-                        # Extract hour and minute from time objects
-                        open_hour = day_hours.get('openTime', {}).get('hour', 0)
-                        open_minute = day_hours.get('openTime', {}).get('minute', 0)
-                        close_hour = day_hours.get('closeTime', {}).get('hour', 23)
-                        close_minute = day_hours.get('closeTime', {}).get('minute', 59)
-                        
-                        # Create time objects for comparison
-                        open_time = datetime.min.time().replace(hour=open_hour, minute=open_minute)
-                        close_time = datetime.min.time().replace(hour=close_hour, minute=close_minute)
-                        
-                        # Check if slot time is within operating hours
-                        # Slot is valid if it's >= open_time and < close_time
-                        return open_time <= slot_time < close_time
-                    # Beyond 30 days, weekly slots are not valid
-                    return False
-                
-                # Date is not in exceptions and not in day-based hours (or day-based hours don't have openTime/closeTime)
-                return False
-            except Exception as e:
-                if os.getenv('DEBUG', 'False').lower() == 'true':
-                    print(f"Error in is_slot_in_operating_hours: {str(e)}")
-                return False
+        slots_zeroed = 0  # Slots set to maxPax=0 and maxWaitlistedPax=0
         
         try:
-            # Process newly generated slots
-            for slot_data in all_slots:
-                key = (slot_data['brandId'],slot_data['outletId'], slot_data['slotStart'], slot_data['channel'])
+            # Process generated slots
+            for slot_data in generated_slots:
+                key = (slot_data['brandId'], slot_data['outletId'], slot_data['slotStart'], slot_data['channel'])
                 
                 if key in existing_slots_map:
-                    # Preserve existing values
+                    # STEP 4A: If existing timeslots exist, only upsert maxPax and maxWaitlistedPax
+                    # Include all primary key fields (brandId, outletId, slotStart, channel) for upsert matching
                     existing = existing_slots_map[key]
-                    slot_data['id'] = existing.get('id') or slot_data['id']
-                    slot_data['outletId'] = existing.get('outletId') or slot_data.get('outletId')
-                    slot_data['usedPax'] = existing.get('usedPax', 0) or 0
-                    slot_data['waitlistedPax'] = existing.get('waitlistedPax', 0) or 0
-                    slot_data['version'] = existing.get('version', 0) or 0
-                    # Update maxPax and maxWaitlistedPax for new dates (16 and 10)
-                    slot_data['maxPax'] = 16
-                    slot_data['maxWaitlistedPax'] = 10
+                    update_data = {
+                        'brandId': brand_id,
+                        'outletId': outlet_id,
+                        'slotStart': slot_data['slotStart'],
+                        'channel': 'both',
+                        'maxPax': 16,
+                        'maxWaitlistedPax': 10,
+                    }
+                    # Include id if it exists (for reference, but primary key matching uses brandId, outletId, slotStart, channel)
+                    if existing.get('id'):
+                        update_data['id'] = existing.get('id')
+                    slots_to_upsert.append(update_data)
                     slots_updated += 1
                 else:
-                    # New slot - set maxPax and maxWaitlistedPax to 16 and 10
-                    slot_data['maxPax'] = 16
-                    slot_data['maxWaitlistedPax'] = 10
+                    # STEP 4B: If no existing timeslots, upsert full row data
+                    full_slot_data = {
+                        'id': str(uuid.uuid4()),
+                        'brandId': brand_id,
+                        'outletId': outlet_id,
+                        'slotStart': slot_data['slotStart'],
+                        'channel': 'both',
+                        'maxPax': 16,
+                        'maxWaitlistedPax': 10,
+                        'usedPax': 0,
+                        'waitlistedPax': 0,
+                        'version': 0
+                    }
+                    slots_to_upsert.append(full_slot_data)
                     slots_created += 1
-                
-                # Ensure outletId is present
-                if 'outletId' not in slot_data or not slot_data.get('outletId'):
-                    debug_info["errors"].append({
-                        "phase": "merge_slots",
-                        "error": f"Missing outletId for slot {slot_data.get('slotStart')}",
-                        "slot_data_keys": list(slot_data.keys())
-                    })
-                    continue
-                
-                slots_to_upsert.append(slot_data)
             
-            # Process existing slots that are no longer in operating hours
-            # Group existing slots by outlet to check against their operating hours
-            for outlet in outlets:
-                outlet_id = outlet.get('id')
-                if not outlet_id:
-                    continue
+            # Process existing slots that don't match any generated slots
+            for existing_slot in all_existing_slots:
+                slot_start_raw = existing_slot.get('slotStart')
+                # Normalize slotStart to ISO format string
+                try:
+                    if isinstance(slot_start_raw, str):
+                        slot_start_iso = slot_start_raw
+                    else:
+                        slot_start_iso = slot_start_raw.isoformat() if hasattr(slot_start_raw, 'isoformat') else str(slot_start_raw)
+                except Exception:
+                    slot_start_iso = str(slot_start_raw)
                 
-                online_operating_hours = outlet.get('onlineOperatingHours', {})
+                key = (existing_slot.get('brandId'), existing_slot.get('outletId'), slot_start_iso, existing_slot.get('channel'))
                 
-                # Find all existing slots for this outlet that are not in the new slots
-                for existing_slot in all_existing_slots:
-                    existing_outlet_id = existing_slot.get('outletId')
-                    if existing_outlet_id != outlet_id:
-                        continue
-                    
-                    slot_start = existing_slot.get('slotStart')
-                    # Normalize slot_start to ISO format string for key matching
-                    # slot_start might be in different formats, so convert to ISO
-                    try:
-                        if isinstance(slot_start, str):
-                            slot_start_iso = slot_start
-                        else:
-                            # If it's a datetime object, convert to ISO
-                            slot_start_iso = slot_start.isoformat() if hasattr(slot_start, 'isoformat') else str(slot_start)
-                    except Exception:
-                        slot_start_iso = str(slot_start)
-                    
-                    # Use the same key format as valid_slot_keys: (brandId, outletId, slotStart_iso, channel)
-                    key = (brand_id, outlet_id, slot_start_iso, 'both')
-                    
-                    # If this slot is not in the newly generated slots, check if it should be removed
-                    if key not in valid_slot_keys:
-                        # Check if this slot's date AND time are still in operating hours
-                        is_still_valid = is_slot_in_operating_hours(slot_start_iso, online_operating_hours)
-                        
-                        if not is_still_valid:
-                            # This slot was removed (either date removed or time outside new hours)
-                            # Set maxPax and maxWaitlistedPax to 0
-                            removed_slot_data = {
-                                'id': existing_slot.get('id'),
-                                'brandId': brand_id,
-                                'outletId': outlet_id,
-                                'slotStart': slot_start_iso,
-                                'channel': 'both',
-                                'maxPax': 0,  # Set to 0 for removed slots
-                                'maxWaitlistedPax': 0,  # Set to 0 for removed slots
-                                'usedPax': existing_slot.get('usedPax', 0) or 0,
-                                'waitlistedPax': existing_slot.get('waitlistedPax', 0) or 0,
-                                'version': existing_slot.get('version', 0) or 0
-                            }
-                            slots_to_upsert.append(removed_slot_data)
-                            slots_removed += 1
-                        # If is_still_valid is True but key not in valid_slot_keys, 
-                        # it means the slot should exist but wasn't generated (edge case - shouldn't happen)
+                # If this existing slot doesn't match any generated slot, set maxPax=0 and maxWaitlistedPax=0
+                if key not in slot_keys:
+                    zeroed_slot_data = {
+                        'brandId': brand_id,
+                        'outletId': outlet_id,
+                        'slotStart': slot_start_iso,
+                        'channel': 'both',
+                        'maxPax': 0,
+                        'maxWaitlistedPax': 0,
+                    }
+                    # Include id if it exists (for reference, but primary key matching uses brandId, outletId, slotStart, channel)
+                    if existing_slot.get('id'):
+                        zeroed_slot_data['id'] = existing_slot.get('id')
+                    slots_to_upsert.append(zeroed_slot_data)
+                    slots_zeroed += 1
             
-            debug_info["checkpoints"].append(f"Merged slots: {slots_created} new, {slots_updated} updated, {slots_removed} removed")
+            debug_info["checkpoints"].append(f"Prepared {slots_created} new slots, {slots_updated} updates, {slots_zeroed} zeroed")
         except Exception as e:
-            debug_info["errors"].append({"phase": "merge_slots", "error": str(e), "traceback": traceback.format_exc()})
+            debug_info["errors"].append({"phase": "prepare_upsert", "error": str(e), "traceback": traceback.format_exc()})
             return Response(
-                {"error": "Failed to merge slots", "message": str(e), "debug_info": debug_info},
+                {"error": "Failed to prepare slots", "message": str(e), "debug_info": debug_info},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-            
-        # STEP 7: Upsert everything to database in batches of 250
+        
+        # STEP 5: Upsert to database in batches of 250
         debug_info["phase"] = "upsert_slots"
-        debug_info["checkpoints"].append("Upserting all slots to database")
+        debug_info["checkpoints"].append("Upserting slots to database")
         
         total_upserted = 0
         total_failed = 0
@@ -819,7 +648,12 @@ def generate_capacity_slots(request):
                 for i in range(0, len(slots_to_upsert), batch_size):
                     batch = slots_to_upsert[i:i + batch_size]
                     try:
-                        supabase.table('ecosuite_capacity_slot').upsert(batch).execute()
+                        # Use upsert with explicit conflict resolution on composite primary key
+                        # Primary key: (brandId, outletId, slotStart, channel)
+                        supabase.table('ecosuite_capacity_slot').upsert(
+                            batch,
+                            on_conflict='brandId,outletId,slotStart,channel'
+                        ).execute()
                         total_upserted += len(batch)
                         debug_info["checkpoints"].append(f"Upserted batch {i // batch_size + 1}: {len(batch)} slots")
                     except Exception as upsert_error:
@@ -843,17 +677,17 @@ def generate_capacity_slots(request):
         return Response({
             "status": "slots_generated",
             "brandId": brand_id,
+            "outletId": outlet_id,
             "dateRange": {
                 "start": today.isoformat(),
                 "end": end_date.isoformat()
             },
-        "totalSlotsGenerated": len(all_slots),
-        "totalSlotsCreated": slots_created,
-        "totalSlotsUpdated": slots_updated,
-        "totalSlotsRemoved": slots_removed,
-        "totalSlotsUpserted": total_upserted,
-        "totalSlotsFailed": total_failed,
-            "outlets": outlet_results,
+            "totalSlotsGenerated": len(generated_slots),
+            "totalSlotsCreated": slots_created,
+            "totalSlotsUpdated": slots_updated,
+            "totalSlotsZeroed": slots_zeroed,
+            "totalSlotsUpserted": total_upserted,
+            "totalSlotsFailed": total_failed,
             "debug_info": debug_info
         }, status=status.HTTP_200_OK)
 
