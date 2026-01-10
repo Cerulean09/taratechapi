@@ -570,23 +570,44 @@ def generate_capacity_slots(request):
             start_datetime = timezone.make_aware(datetime.combine(today, datetime.min.time()))
             end_datetime = timezone.make_aware(datetime.combine(end_date, datetime.max.time()))
             
+            # Get list of outlet IDs to fetch slots for
+            outlet_ids_to_fetch = [outlet.get('id') for outlet in outlets if outlet.get('id')]
+            
             # Fetch in batches to avoid query limits
             batch_size = 1000
             offset = 0
             while True:
                 try:
-                    existing_response = supabase.table('ecosuite_capacity_slot').select(
+                    # Build query - filter by brand and date range
+                    query = supabase.table('ecosuite_capacity_slot').select(
                         'id, brandId, outletId, slotStart, channel, maxPax, maxWaitlistedPax, usedPax, waitlistedPax, version'
-                    ).eq('brandId', brand_id).eq('outletId', outlet_id).eq('channel', 'both').gte('slotStart', start_datetime.isoformat()).lte('slotStart', end_datetime.isoformat()).range(offset, offset + batch_size - 1).execute()
+                    ).eq('brandId', brand_id).eq('channel', 'both').gte('slotStart', start_datetime.isoformat()).lte('slotStart', end_datetime.isoformat())
+                    
+                    # Filter by outlet IDs if we have specific outlets
+                    if outlet_ids_to_fetch:
+                        query = query.in_('outletId', outlet_ids_to_fetch)
+                    
+                    existing_response = query.range(offset, offset + batch_size - 1).execute()
                     
                     if not existing_response.data or len(existing_response.data) == 0:
                         break
                     
                     all_existing_slots.extend(existing_response.data)
                     
-                    # Also add to map for merging
+                    # Also add to map for merging - normalize slotStart to ISO format for consistent key matching
                     for existing_slot in existing_response.data:
-                        key = (existing_slot.get('brandId'), existing_slot.get('outletId'), existing_slot.get('slotStart'), existing_slot.get('channel'))
+                        slot_start_raw = existing_slot.get('slotStart')
+                        # Normalize slotStart to ISO format string
+                        try:
+                            if isinstance(slot_start_raw, str):
+                                slot_start_iso = slot_start_raw
+                            else:
+                                slot_start_iso = slot_start_raw.isoformat() if hasattr(slot_start_raw, 'isoformat') else str(slot_start_raw)
+                        except Exception:
+                            slot_start_iso = str(slot_start_raw)
+                        
+                        # Use normalized ISO format for key matching
+                        key = (existing_slot.get('brandId'), existing_slot.get('outletId'), slot_start_iso, existing_slot.get('channel'))
                         existing_slots_map[key] = existing_slot
                     
                     if len(existing_response.data) < batch_size:
@@ -656,6 +677,7 @@ def generate_capacity_slots(request):
                         # Check if slot time is within operating hours
                         # Slot is valid if it's >= open_time and < close_time
                         return open_time <= slot_time < close_time
+                    # If exception exists but no openTime/closeTime, date is not valid
                     return False
                                             
                 # Check day-based hours
@@ -677,8 +699,10 @@ def generate_capacity_slots(request):
                         # Check if slot time is within operating hours
                         # Slot is valid if it's >= open_time and < close_time
                         return open_time <= slot_time < close_time
+                    # Beyond 30 days, weekly slots are not valid
                     return False
                 
+                # Date is not in exceptions and not in day-based hours (or day-based hours don't have openTime/closeTime)
                 return False
             except Exception as e:
                 if os.getenv('DEBUG', 'False').lower() == 'true':
@@ -752,7 +776,9 @@ def generate_capacity_slots(request):
                     # If this slot is not in the newly generated slots, check if it should be removed
                     if key not in valid_slot_keys:
                         # Check if this slot's date AND time are still in operating hours
-                        if not is_slot_in_operating_hours(slot_start_iso, online_operating_hours):
+                        is_still_valid = is_slot_in_operating_hours(slot_start_iso, online_operating_hours)
+                        
+                        if not is_still_valid:
                             # This slot was removed (either date removed or time outside new hours)
                             # Set maxPax and maxWaitlistedPax to 0
                             removed_slot_data = {
@@ -769,6 +795,8 @@ def generate_capacity_slots(request):
                             }
                             slots_to_upsert.append(removed_slot_data)
                             slots_removed += 1
+                        # If is_still_valid is True but key not in valid_slot_keys, 
+                        # it means the slot should exist but wasn't generated (edge case - shouldn't happen)
             
             debug_info["checkpoints"].append(f"Merged slots: {slots_created} new, {slots_updated} updated, {slots_removed} removed")
         except Exception as e:
