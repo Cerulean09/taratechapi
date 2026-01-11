@@ -31,6 +31,7 @@ pydantic==2.12.4
 pydantic_core==2.41.5
 PyJWT==2.10.1
 PyYAML==6.0.3
+pytz==2025.1
 realtime==2.23.2
 requests==2.32.4
 shellescape==3.8.1

@@ -22,6 +22,7 @@ from django.utils import timezone
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
+import pytz
 
 def create_esb_header(request, additional_headers=None):
     headers = {
@@ -2932,131 +2933,173 @@ def _send_cancel_broadcast(token, reservations, campaign_name='026', template_id
             }
     except Exception as e:
         return {"success": False, "error": str(e)}
+# assumes:
+# - create_supabase_client()
+# - _login_to_koala()
+# - _send_cancel_broadcast(token, reservations, campaign_name, template_id)
 
-@api_view(['GET'])
+JAKARTA_TZ = pytz.timezone("Asia/Jakarta")
+
+def _now_jakarta_naive():
+    """
+    Returns Jakarta 'local' timestamp WITHOUT tzinfo (naive),
+    matching how your Supabase column confirmedExpiryDateTime is stored:
+    timestamp (no tz) in Jakarta time.
+    """
+    return timezone.now().astimezone(JAKARTA_TZ).replace(tzinfo=None)
+
+
+def _to_pg_timestamp_str(dt_naive):
+    """
+    PostgREST likes ISO strings. For timestamp (no tz) columns,
+    send 'YYYY-MM-DDTHH:MM:SS' (no timezone suffix).
+    """
+    return dt_naive.replace(microsecond=0).isoformat()
+
+
+@api_view(["GET"])
 @permission_classes([AllowAny])
-def send_cancel_notification_for_confirmed_reservations_1day_before_reservation_date(request):
-    """Get all confirmed reservations where the reservation date is 1 day from today (tomorrow).
-    Compares only the date part, not the time.
-    If reservations are found, automatically sends cancel notification messages via Koala WhatsApp.
-    
-    Query parameters:
-    - brandId: (optional) Filter reservations by brand ID
+def send_cancel_notification_for_confirmed_reservations_when_expired(request):
+    """
+    Cancels ONLY reservations where:
+      - status == 'confirmed'
+      - confirmedExpiryDateTime IS NOT NULL
+      - confirmedExpiryDateTime <= now (Jakarta local timestamp, no tz)
+
+    Any other status with confirmedExpiryDateTime != null is left untouched.
+    Optional query param:
+      - brandId
     """
     supabase = create_supabase_client()
+
     try:
-        # Get brandId from query parameters (optional)
-        brand_id = request.query_params.get('brandId')
-        
-        # Get today's date and calculate target date (1 day from today, i.e., tomorrow)
-        today = timezone.localdate()
-        target_date = today + timedelta(days=1)
-        
-        # Get reservations from the database, optionally filtered by brandId
-        query = supabase.table('ecosuite_reservations').select('*')
+        brand_id = request.query_params.get("brandId")
+
+        now_jkt_naive = _now_jakarta_naive()
+        now_jkt_str = _to_pg_timestamp_str(now_jkt_naive)
+
+        # Filter in Supabase (server-side) to avoid pulling all rows
+        query = (
+            supabase.table("ecosuite_reservations")
+            .select("*")
+            .eq("status", "confirmed")
+            .not_.is_("confirmedExpiryDateTime", "null")
+            .lte("confirmedExpiryDateTime", now_jkt_str)
+        )
+
         if brand_id:
-            query = query.eq('brandId', brand_id)
+            query = query.eq("brandId", brand_id)
+
         response = query.execute()
-        all_reservations = response.data or []
-        
-        # Filter reservations where the date part matches the target date and status is confirmed
-        matching_reservations = []
-        for reservation in all_reservations:
-            # Only process confirmed reservations
-            reservation_status = reservation.get('status')
-            if reservation_status != 'confirmed':
-                continue
-            
-            reservation_date_time = reservation.get('reservationDateTime')
-            if not reservation_date_time:
-                continue
-            
-            try:
-                # Parse the reservation datetime
-                # Handle various ISO format variations
-                reservation_dt = None
-                if 'Z' in reservation_date_time:
-                    reservation_dt = datetime.fromisoformat(reservation_date_time.replace('Z', '+00:00'))
-                elif '+' in reservation_date_time or reservation_date_time.count('-') > 2:
-                    reservation_dt = datetime.fromisoformat(reservation_date_time)
-                else:
-                    reservation_dt = datetime.fromisoformat(reservation_date_time)
-                
-                # Extract only the date part
-                reservation_date = reservation_dt.date()
-                
-                # Check if the reservation date matches the target date (1 day from today)
-                if reservation_date == target_date:
-                    matching_reservations.append(reservation)
-            except Exception as parse_error:
-                # Skip reservations with invalid datetime format
-                continue
-        
-        # If list is not empty, send cancel notification messages
+        matching_reservations = response.data or []
+
         broadcast_result = None
         updated_reservations = []
         failed_updates = []
-        
+
         if matching_reservations:
-            # Login to Koala to get token
             token = _login_to_koala()
             if not token:
-                return Response({
-                    "reservations": matching_reservations,
-                    "count": len(matching_reservations),
-                    "message": "Reservations found but failed to authenticate with Koala. Messages not sent.",
-                    "broadcast_result": None
-                }, status=status.HTTP_200_OK)
-            
-            # Send cancel notification messages for all reservations in a single broadcast
-            broadcast_result = _send_cancel_broadcast(token, matching_reservations, campaign_name='026', template_id='026')
-            
-            # If broadcast was successful, update all reservations to cancelled status
+                return Response(
+                    {
+                        "brandId": brand_id,
+                        "brandId_filtered": brand_id is not None,
+                        "filter": {
+                            "status": "confirmed",
+                            "confirmedExpiryDateTime_not_null": True,
+                            "confirmedExpiryDateTime_lte_nowJakarta": now_jkt_str,
+                        },
+                        "reservations": matching_reservations,
+                        "count": len(matching_reservations),
+                        "message": "Reservations found but failed to authenticate with Koala. Messages not sent.",
+                        "broadcast_result": None,
+                        "messages_sent": False,
+                        "updated_reservations": [],
+                        "updated_count": 0,
+                        "failed_updates": [],
+                        "failed_count": 0,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            # Send cancel notification messages (single broadcast)
+            broadcast_result = _send_cancel_broadcast(
+                token,
+                matching_reservations,
+                campaign_name="026",
+                template_id="026",
+            )
+
+            # Only cancel in DB if broadcast succeeded
             if broadcast_result and broadcast_result.get("success", False):
-                now = timezone.now().isoformat()
+                updated_at_str = now_jkt_str  # keep updatedAt in Jakarta local timestamp (no tz)
+
                 for reservation in matching_reservations:
-                    reservation_id = reservation.get('id')
+                    reservation_id = reservation.get("id")
                     if not reservation_id:
                         continue
-                    
+
                     try:
-                        # Update reservation status to cancelled
                         update_data = {
-                            'status': 'cancelled',
-                            'updatedAt': now
+                            "status": "cancelled",
+                            "updatedAt": updated_at_str,
+                            # optional: keep note trail (uncomment if you want)
+                            # "notes": (reservation.get("notes") or "") + (
+                            #     ("\n" if reservation.get("notes") else "") +
+                            #     f"[AUTO_CANCEL {updated_at_str}] Confirmed expired (not reconfirmed)"
+                            # )
                         }
-                        
-                        update_response = supabase.table('ecosuite_reservations').update(update_data).eq('id', reservation_id).execute()
-                        
-                        if update_response.data and len(update_response.data) > 0:
+
+                        update_resp = (
+                            supabase.table("ecosuite_reservations")
+                            .update(update_data)
+                            .eq("id", reservation_id)
+                            .execute()
+                        )
+
+                        if update_resp.data and len(update_resp.data) > 0:
                             updated_reservations.append(reservation_id)
                         else:
-                            failed_updates.append({
-                                "reservation_id": reservation_id,
-                                "error": "Failed to update reservation status"
-                            })
+                            failed_updates.append(
+                                {
+                                    "reservation_id": reservation_id,
+                                    "error": "Failed to update reservation status",
+                                }
+                            )
+
                     except Exception as update_error:
-                        failed_updates.append({
-                            "reservation_id": reservation_id,
-                            "error": str(update_error)
-                        })
-        
-        # Return the JSON of all matching reservations along with broadcast result
-        return Response({
-            "brandId": brand_id,
-            "brandId_filtered": brand_id is not None,
-            "reservations": matching_reservations,
-            "count": len(matching_reservations),
-            "broadcast_result": broadcast_result,
-            "messages_sent": len(matching_reservations) > 0 and broadcast_result and broadcast_result.get("success", False),
-            "updated_reservations": updated_reservations,
-            "updated_count": len(updated_reservations),
-            "failed_updates": failed_updates,
-            "failed_count": len(failed_updates)
-        }, status=status.HTTP_200_OK)
+                        failed_updates.append(
+                            {"reservation_id": reservation_id, "error": str(update_error)}
+                        )
+
+        return Response(
+            {
+                "brandId": brand_id,
+                "brandId_filtered": brand_id is not None,
+                "filter": {
+                    "status": "confirmed",
+                    "confirmedExpiryDateTime_not_null": True,
+                    "confirmedExpiryDateTime_lte_nowJakarta": now_jkt_str,
+                },
+                "nowJakarta": now_jkt_str,
+                "reservations": matching_reservations,
+                "count": len(matching_reservations),
+                "broadcast_result": broadcast_result,
+                "messages_sent": bool(
+                    matching_reservations
+                    and broadcast_result
+                    and broadcast_result.get("success", False)
+                ),
+                "updated_reservations": updated_reservations,
+                "updated_count": len(updated_reservations),
+                "failed_updates": failed_updates,
+                "failed_count": len(failed_updates),
+            },
+            status=status.HTTP_200_OK,
+        )
+
     except Exception as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def check_waitlisted_reservations_with_confirmedExpiryDateTime_expired(request):
