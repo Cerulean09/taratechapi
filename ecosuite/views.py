@@ -3083,12 +3083,18 @@ def check_waitlisted_reservations_with_confirmedExpiryDateTime_expired(request):
         all_reservations = response.data or []
         
         # Filter reservations with confirmedExpiryDateTime that is not None or null
+        # Only process reservations with status 'confirmed'
         expired_reservations = []
         for reservation in all_reservations:
             confirmed_expiry_date_time = reservation.get('confirmedExpiryDateTime')
+            reservation_status = reservation.get('status')
             
             # Skip if confirmedExpiryDateTime is None or null
             if not confirmed_expiry_date_time:
+                continue
+            
+            # Only process reservations with status 'confirmed'
+            if reservation_status != 'confirmed':
                 continue
             
             try:
