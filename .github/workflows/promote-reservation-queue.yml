@@ -2,15 +2,16 @@ name: Promote Reservation Queue
 
 on:
   schedule:
-    # Run every minute (GitHub Actions minimum is 1 minute)
-    # The script will call the endpoint every 10 seconds within each run
-    - cron: '*/1 * * * *'
+    # Run every 6 hours to ensure continuous coverage
+    # Each run will loop for 6 hours (max GitHub Actions runtime)
+    # Times: 00:00, 06:00, 12:00, 18:00 UTC
+    - cron: '0 */6 * * *'
   workflow_dispatch: # Allow manual triggering
 
 jobs:
   promote-queue:
     runs-on: ubuntu-latest
-    timeout-minutes: 1 # Run for 1 minute, calling every 10 seconds
+    timeout-minutes: 360 # Run for 6 hours (360 minutes), calling every 10 seconds
     
     steps:
       - name: Promote Reservation Queue
@@ -20,24 +21,30 @@ jobs:
           BRAND_ID="ILY79IOQG6"
           OUTLET_ID="74f2e7c0-bc5a-11f0-9935-313b5fd1007a"
           
-          # Calculate end time (1 minute from now)
-          END_TIME=$(($(date +%s) + 60))
+          # Calculate end time (6 hours from now = 21600 seconds)
+          END_TIME=$(($(date +%s) + 21600))
           
           echo "Starting reservation queue promotion..."
           echo "API URL: ${API_URL}"
           echo "Brand ID: ${BRAND_ID}"
           echo "Outlet ID: ${OUTLET_ID}"
-          echo "Will run every 10 seconds for 1 minute"
+          echo "Will run every 10 seconds for 6 hours"
+          echo "Start time: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "End time: $(date -d @$END_TIME '+%Y-%m-%d %H:%M:%S')"
           
-          # Loop every 10 seconds until 1 minute has passed
+          CALL_COUNT=0
+          
+          # Loop every 10 seconds until 6 hours have passed
           while [ $(date +%s) -lt $END_TIME ]; do
+            CALL_COUNT=$((CALL_COUNT + 1))
             echo ""
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Calling promote reservation queue endpoint..."
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Call #${CALL_COUNT} - Calling promote reservation queue endpoint..."
             
             # Make the API call
             RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
               "${API_URL}?brandId=${BRAND_ID}&outletId=${OUTLET_ID}" \
-              -H "Content-Type: application/json")
+              -H "Content-Type: application/json" \
+              --max-time 5)
             
             HTTP_STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS" | cut -d: -f2)
             BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS/d')
@@ -54,4 +61,6 @@ jobs:
           
           echo ""
           echo "Completed reservation queue promotion cycle"
+          echo "Total calls made: ${CALL_COUNT}"
+          echo "End time: $(date '+%Y-%m-%d %H:%M:%S')"
 

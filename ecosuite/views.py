@@ -4687,12 +4687,15 @@ def promoteReservationQueue(request):
         supabase = create_supabase_client()
         
         # Build RPC payload with required parameters
+        # Note: p_max_active and p_reservation_minutes are optional
+        # If not provided, the RPC will use its defaults (5 for both)
         rpc_payload = {
             "p_brand_id": brand_id,
             "p_outlet_id": outlet_id,
         }
         
-        # Add optional parameters only if provided
+        # Add optional parameters only if explicitly provided
+        # If not provided, RPC defaults (p_max_active=5, p_reservation_minutes=5) will be used
         if max_active is not None:
             try:
                 rpc_payload["p_max_active"] = int(max_active)
