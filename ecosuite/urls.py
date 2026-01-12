@@ -60,4 +60,7 @@ urlpatterns = [
     path('esb/get-tables-list/', views.get_tables_list, name='get_tables_list'),
     path('esb/get-visit-purpose/', views.get_visit_purpose, name='get_visit_purpose'),
     path('esb/submit-reservation-transaction/', views.submit_reservation_transaction, name='submit_reservation_transaction'),
+    
+    # Queue Management Endpoints
+    path('promote-reservation-queue/', views.promoteReservationQueue, name='promote_reservation_queue'),
 ]

@@ -4651,3 +4651,69 @@ def format_reservation_datetime(reservation_datetime):
         return reservation_datetime
 
 
+@api_view(["GET", "POST"])
+@permission_classes([AllowAny])
+def promoteReservationQueue(request):
+    """
+    Promote the reservation queue by calling the RPC function.
+    This endpoint processes waitlisted reservations and promotes them when capacity becomes available.
+    
+    Query parameters:
+    - brandId: Brand ID (required)
+    - outletId: Outlet ID (required)
+    """
+    try:
+        # Get brandId and outletId from query parameters
+        brand_id = request.query_params.get('brandId')
+        outlet_id = request.query_params.get('outletId')
+        
+        # Validate required parameters
+        if not brand_id or not outlet_id:
+            return Response(
+                {
+                    "error": "Missing required parameters",
+                    "message": "Both brandId and outletId are required as query parameters"
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Create Supabase client
+        supabase = create_supabase_client()
+        
+        # Call RPC function to promote reservation queue
+        rpc_payload = {
+            "p_brand_id": brand_id,
+            "p_outlet_id": outlet_id,
+        }
+        
+        result = supabase.rpc("promote_reservation_queue", rpc_payload).execute()
+        
+        if result.data is None:
+            return Response(
+                {
+                    "error": "RPC call returned no data",
+                    "message": "The promote_reservation_queue RPC call did not return any data"
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+        
+        # Return RPC result
+        return Response(result.data, status=status.HTTP_200_OK)
+        
+    except Exception as e:
+        error_str = str(e)
+        import traceback
+        error_details = {
+            "error": error_str,
+            "error_type": type(e).__name__
+        }
+        
+        if os.getenv('DEBUG', 'False').lower() == 'true':
+            error_details["traceback"] = traceback.format_exc()
+        
+        return Response(
+            error_details,
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
