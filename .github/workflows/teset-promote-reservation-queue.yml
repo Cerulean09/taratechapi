@@ -1,0 +1,66 @@
+name: Promote Reservation Queue
+
+on:
+  schedule:
+    # Run every 6 hours to ensure continuous coverage
+    # Each run will loop for 6 hours (max GitHub Actions runtime)
+    # Times: 00:00, 06:00, 12:00, 18:00 UTC
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  promote-queue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # Run for 6 hours (360 minutes), calling every 10 seconds
+    
+    steps:
+      - name: Promote Reservation Queue
+        run: |
+          # Set API endpoint URL (update this if your API URL is different)
+          API_URL="${API_URL:-https://taratechapi.fly.dev/api/ecosuite/promote-reservation-queue/}"
+          BRAND_ID="3CFJB0UV4K"
+          OUTLET_ID="2bb35690-bc59-11f0-9241-23dd8bab09d4"
+          
+          # Calculate end time (6 hours from now = 21600 seconds)
+          END_TIME=$(($(date +%s) + 21600))
+          
+          echo "Starting reservation queue promotion..."
+          echo "API URL: ${API_URL}"
+          echo "Brand ID: ${BRAND_ID}"
+          echo "Outlet ID: ${OUTLET_ID}"
+          echo "Will run every 10 seconds for 6 hours"
+          echo "Start time: $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "End time: $(date -d @$END_TIME '+%Y-%m-%d %H:%M:%S')"
+          
+          CALL_COUNT=0
+          
+          # Loop every 10 seconds until 6 hours have passed
+          while [ $(date +%s) -lt $END_TIME ]; do
+            CALL_COUNT=$((CALL_COUNT + 1))
+            echo ""
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Call #${CALL_COUNT} - Calling promote reservation queue endpoint..."
+            
+            # Make the API call
+            RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+              "${API_URL}?brandId=${BRAND_ID}&outletId=${OUTLET_ID}" \
+              -H "Content-Type: application/json" \
+              --max-time 5)
+            
+            HTTP_STATUS=$(echo "$RESPONSE" | grep "HTTP_STATUS" | cut -d: -f2)
+            BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS/d')
+            
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "✓ Success: $BODY"
+            else
+              echo "✗ Error (HTTP $HTTP_STATUS): $BODY"
+            fi
+            
+            # Sleep for 10 seconds
+            sleep 10
+          done
+          
+          echo ""
+          echo "Completed reservation queue promotion cycle"
+          echo "Total calls made: ${CALL_COUNT}"
+          echo "End time: $(date '+%Y-%m-%d %H:%M:%S')"
+
