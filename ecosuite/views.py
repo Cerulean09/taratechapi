@@ -4656,11 +4656,13 @@ def format_reservation_datetime(reservation_datetime):
 def promoteReservationQueue(request):
     """
     Promote the reservation queue by calling the RPC function.
-    This endpoint processes waitlisted reservations and promotes them when capacity becomes available.
+    This endpoint checks and promotes reservations from the queue, expiring stale leases and promoting new ones.
     
     Query parameters:
     - brandId: Brand ID (required)
     - outletId: Outlet ID (required)
+    - maxActive: Maximum number of active reservations (optional, default: 5)
+    - reservationMinutes: Minutes until reservation expires (optional, default: 5)
     """
     try:
         # Get brandId and outletId from query parameters
@@ -4677,22 +4679,52 @@ def promoteReservationQueue(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
+        # Get optional parameters
+        max_active = request.query_params.get('maxActive')
+        reservation_minutes = request.query_params.get('reservationMinutes')
+        
         # Create Supabase client
         supabase = create_supabase_client()
         
-        # Call RPC function to promote reservation queue
+        # Build RPC payload with required parameters
         rpc_payload = {
             "p_brand_id": brand_id,
             "p_outlet_id": outlet_id,
         }
         
-        result = supabase.rpc("promote_reservation_queue", rpc_payload).execute()
+        # Add optional parameters only if provided
+        if max_active is not None:
+            try:
+                rpc_payload["p_max_active"] = int(max_active)
+            except ValueError:
+                return Response(
+                    {
+                        "error": "Invalid maxActive parameter",
+                        "message": "maxActive must be a valid integer"
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        if reservation_minutes is not None:
+            try:
+                rpc_payload["p_reservation_minutes"] = int(reservation_minutes)
+            except ValueError:
+                return Response(
+                    {
+                        "error": "Invalid reservationMinutes parameter",
+                        "message": "reservationMinutes must be a valid integer"
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Call RPC function to check and promote reservation queue
+        result = supabase.rpc("check_and_promote_reservation_queue", rpc_payload).execute()
         
         if result.data is None:
             return Response(
                 {
                     "error": "RPC call returned no data",
-                    "message": "The promote_reservation_queue RPC call did not return any data"
+                    "message": "The check_and_promote_reservation_queue RPC call did not return any data"
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
